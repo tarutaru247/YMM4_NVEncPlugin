@@ -181,6 +181,7 @@ namespace
         NV_ENC_CONFIG config{};
         NV_ENC_OUTPUT_PTR bitstream = nullptr;
         NV_ENC_BUFFER_FORMAT bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
+        NV_ENC_BUFFER_FORMAT originalBufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
         int fastPreset = 0;
         ID3D11Device* device = nullptr;
         ID3D11VideoDevice* videoDevice = nullptr;
@@ -1413,11 +1414,25 @@ namespace
         state->height = height;
         state->fps = fps;
         state->fastPreset = fastPreset;
-        state->bufferFormat = (fastPreset != 0) ? NV_ENC_BUFFER_FORMAT_NV12 : bufferFormat;
+        state->originalBufferFormat = bufferFormat;
+        state->bufferFormat = bufferFormat;
         state->device = device;
         if (state->device)
         {
             state->device->AddRef();
+        }
+
+        if (state->fastPreset != 0)
+        {
+            if (EnsureVideoProcessor(state))
+            {
+                state->bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
+            }
+            else
+            {
+                state->fastPreset = 0;
+                state->bufferFormat = state->originalBufferFormat;
+            }
         }
 
         // Load only from System32 to avoid DLL hijacking via current/plugin directories.
@@ -1459,10 +1474,10 @@ namespace
         state->config.version = NV_ENC_CONFIG_VER;
 
         const GUID encodeGuid = (codec == 1) ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
-        const GUID presetGuid = (fastPreset != 0)
+        const GUID presetGuid = (state->fastPreset != 0)
             ? NV_ENC_PRESET_P1_GUID
             : (quality <= 0 ? NV_ENC_PRESET_P1_GUID : (quality == 2 ? NV_ENC_PRESET_P7_GUID : NV_ENC_PRESET_P3_GUID));
-        const NV_ENC_TUNING_INFO tuningInfo = (fastPreset != 0)
+        const NV_ENC_TUNING_INFO tuningInfo = (state->fastPreset != 0)
             ? NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY
             : NV_ENC_TUNING_INFO_HIGH_QUALITY;
 
@@ -1500,11 +1515,11 @@ namespace
             : state->config.rcParams.averageBitRate;
         state->config.gopLength = state->fps * 2;
         state->config.frameIntervalP = 1;
-        if (fastPreset != 0)
+        if (state->fastPreset != 0)
         {
             state->initParams.enableSubFrameWrite = 1;
         }
-        if (fastPreset != 0)
+        if (state->fastPreset != 0)
         {
             state->config.gopLength = state->fps * 4;
             state->config.rcParams.enableAQ = 0;
