@@ -41,6 +41,7 @@ bld/
 YukkuriMovieMaker_v4_Lite/
 test_video/
 PLAN.md
+dist/
 NVEncC_*/
 NVEncC_*.7z
 NVEncC64.exe
