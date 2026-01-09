@@ -1,15 +1,23 @@
 # NVENC プラグイン出力
 
-YMM4向けのNVENC対応動画出力プラグインです。H.264 / H.265 のMP4を書き出します。
+YMM4でNVENC動画出力をするためのプラグインです。H.264 / H.265 のMP4を書き出します。
+GPUを使用することでエンコードを高速化します。
+
+## インストール
+1. [リリースページ](https://github.com/tarutaru247/YMM4_NVEncPlugin/releases/new)もしくは[Booth](https://tarutaru247.booth.pm/)から、NVEncPlugin.ymmeをダウンロード
+2. ダウンロードしたファイルを開くと、自動的にYMM4のプラグインインストーラーが起動します
+3. インストーラーの指示に従いインストール
 
 ## 使い方
 1. YMM4の出力形式から「NVENC プラグイン出力」を選択
 2. コーデック、出力品質、ビットレート方式を設定
-3. 出力形式は `.mp4`
+3. 出力形式は`.mp4`
 
 ## 必要環境
-- Windows
+- Windows 11
 - NVIDIA GPU と最新ドライバ
+
+```AMD GPUやIntel GPUでは動作しません```
 
 ## 音声
 - AAC固定（Media FoundationのAACエンコーダを使用）
