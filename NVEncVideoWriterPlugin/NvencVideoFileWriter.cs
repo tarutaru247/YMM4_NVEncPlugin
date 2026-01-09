@@ -196,7 +196,7 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             return Math.Clamp(_settings.BitrateKbps, 100, 200000);
         }
 
-        var height = Math.Max(_videoInfo.Width, _videoInfo.Height);
+        var height = Math.Max(1, _videoInfo.Height);
         var highFps = _videoInfo.FPS >= 48;
         return height switch
         {
