@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 
 #include <mfapi.h>
 #include <mfidl.h>
@@ -185,6 +189,20 @@ namespace
         ID3D11VideoProcessor* videoProcessor = nullptr;
         ID3D11Texture2D* nv12Texture = nullptr;
         ID3D11VideoProcessorOutputView* vpOutputView = nullptr;
+        NV_ENC_REGISTERED_PTR registeredNv12 = nullptr;
+        std::mutex fileMutex;
+        std::mutex writerMutex;
+        std::condition_variable writerCv;
+        std::thread writerThread;
+        bool writerStarted = false;
+        bool writerStop = false;
+        bool writerError = false;
+        struct EncodedSample
+        {
+            std::vector<uint8_t> data;
+            bool keyframe = false;
+        };
+        std::deque<EncodedSample> sampleQueue;
         int width = 0;
         int height = 0;
         int fps = 30;
@@ -225,6 +243,8 @@ namespace
     bool FlushAudio(EncoderState* state);
     bool EnsureVideoProcessor(EncoderState* state);
     ID3D11Texture2D* ConvertToNv12(EncoderState* state, ID3D11Texture2D* texture);
+    void StartWriterThread(EncoderState* state);
+    void StopWriterThread(EncoderState* state);
 
     void SetError(EncoderState* state, const std::wstring& message)
     {
@@ -571,6 +591,7 @@ namespace
 
             if (curLen > 0)
             {
+                std::lock_guard<std::mutex> lock(state->fileMutex);
                 uint64_t offset = state->file.Tell();
                 if (!state->file.Write(data, curLen))
                 {
@@ -1521,39 +1542,67 @@ namespace
         return true;
     }
 
-bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
-{
+    bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
+    {
+        bool usesRegistered = false;
         if (state->fastPreset != 0)
         {
             auto* converted = ConvertToNv12(state, texture);
-            if (converted)
+            if (!converted)
             {
-                texture = converted;
+                SetError(state, L"Failed to convert input to NV12.");
+                return false;
             }
+            texture = converted;
+
+            if (!state->registeredNv12)
+            {
+                NV_ENC_REGISTER_RESOURCE registerRes{};
+                registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
+                registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+                registerRes.resourceToRegister = texture;
+                registerRes.width = state->width;
+                registerRes.height = state->height;
+                registerRes.bufferFormat = state->bufferFormat;
+                registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
+                auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
+                if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+                {
+                    return false;
+                }
+                state->registeredNv12 = registerRes.registeredResource;
+            }
+            usesRegistered = true;
         }
 
         NV_ENC_REGISTER_RESOURCE registerRes{};
-        registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
-        registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-        registerRes.resourceToRegister = texture;
-        registerRes.width = state->width;
-        registerRes.height = state->height;
-        registerRes.bufferFormat = state->bufferFormat;
-        registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
-
-        auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
-        if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+        if (!usesRegistered)
         {
-            return false;
+            registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
+            registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+            registerRes.resourceToRegister = texture;
+            registerRes.width = state->width;
+            registerRes.height = state->height;
+            registerRes.bufferFormat = state->bufferFormat;
+            registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
+
+            auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
+            if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+            {
+                return false;
+            }
         }
 
         NV_ENC_MAP_INPUT_RESOURCE map{};
         map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
-        map.registeredResource = registerRes.registeredResource;
-        status = state->funcs.nvEncMapInputResource(state->session, &map);
+        map.registeredResource = usesRegistered ? state->registeredNv12 : registerRes.registeredResource;
+        auto status = state->funcs.nvEncMapInputResource(state->session, &map);
         if (!CheckStatus(state, status, L"nvEncMapInputResource failed"))
         {
-            state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
+            if (!usesRegistered)
+            {
+                state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
+            }
             return false;
         }
 
@@ -1570,7 +1619,10 @@ bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
 
         status = state->funcs.nvEncEncodePicture(state->session, &pic);
         state->funcs.nvEncUnmapInputResource(state->session, map.mappedResource);
-        state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
+        if (!usesRegistered)
+        {
+            state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
+        }
         if (status == NV_ENC_ERR_NEED_MORE_INPUT)
         {
             return true;
@@ -1673,20 +1725,20 @@ bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
             return true;
         }
 
-        uint64_t offset = state->file.Tell();
-        if (!state->file.Write(sampleData.data(), sampleData.size()))
+        if (!state->writerStarted)
         {
-            SetError(state, L"Failed to write sample data.");
+            StartWriterThread(state);
+        }
+        if (state->writerError)
+        {
             state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
             return false;
         }
-
-        state->sampleOffsets.push_back(offset);
-        state->sampleSizes.push_back(static_cast<uint32_t>(sampleData.size()));
-        if (isKeyframe)
         {
-            state->syncSamples.push_back(static_cast<uint32_t>(state->sampleSizes.size()));
+            std::lock_guard<std::mutex> lock(state->writerMutex);
+            state->sampleQueue.push_back({ std::move(sampleData), isKeyframe });
         }
+        state->writerCv.notify_one();
 
         status = state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
         return CheckStatus(state, status, L"nvEncUnlockBitstream failed");
@@ -1794,6 +1846,75 @@ bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
 
         return state->nv12Texture;
     }
+
+    void StartWriterThread(EncoderState* state)
+    {
+        if (!state || state->writerStarted)
+        {
+            return;
+        }
+        state->writerStop = false;
+        state->writerError = false;
+        state->writerStarted = true;
+        state->writerThread = std::thread([state]()
+        {
+            for (;;)
+            {
+                EncoderState::EncodedSample sample;
+                {
+                    std::unique_lock<std::mutex> lock(state->writerMutex);
+                    state->writerCv.wait(lock, [state]()
+                    {
+                        return state->writerStop || !state->sampleQueue.empty();
+                    });
+                    if (state->writerStop && state->sampleQueue.empty())
+                    {
+                        break;
+                    }
+                    sample = std::move(state->sampleQueue.front());
+                    state->sampleQueue.pop_front();
+                }
+
+                if (sample.data.empty())
+                {
+                    continue;
+                }
+
+                std::lock_guard<std::mutex> fileLock(state->fileMutex);
+                uint64_t offset = state->file.Tell();
+                if (!state->file.Write(sample.data.data(), sample.data.size()))
+                {
+                    SetError(state, L"Failed to write sample data.");
+                    state->writerError = true;
+                    break;
+                }
+                state->sampleOffsets.push_back(offset);
+                state->sampleSizes.push_back(static_cast<uint32_t>(sample.data.size()));
+                if (sample.keyframe)
+                {
+                    state->syncSamples.push_back(static_cast<uint32_t>(state->sampleSizes.size()));
+                }
+            }
+        });
+    }
+
+    void StopWriterThread(EncoderState* state)
+    {
+        if (!state || !state->writerStarted)
+        {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(state->writerMutex);
+            state->writerStop = true;
+        }
+        state->writerCv.notify_all();
+        if (state->writerThread.joinable())
+        {
+            state->writerThread.join();
+        }
+        state->writerStarted = false;
+    }
 }
 
 void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, int bufferFormat, const wchar_t* outputPath)
@@ -1898,6 +2019,8 @@ int NvencFinalize(void* handle)
         return 0;
     }
 
+    StopWriterThread(state);
+
     if (!FinalizeMp4(state))
     {
         return 0;
@@ -1914,8 +2037,15 @@ void NvencDestroy(void* handle)
         return;
     }
 
+    StopWriterThread(state);
+
     if (state->session)
     {
+        if (state->registeredNv12)
+        {
+            state->funcs.nvEncUnregisterResource(state->session, state->registeredNv12);
+            state->registeredNv12 = nullptr;
+        }
         if (state->bitstream)
         {
             state->funcs.nvEncDestroyBitstreamBuffer(state->session, state->bitstream);
