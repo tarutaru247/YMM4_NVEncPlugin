@@ -177,6 +177,14 @@ namespace
         NV_ENC_CONFIG config{};
         NV_ENC_OUTPUT_PTR bitstream = nullptr;
         NV_ENC_BUFFER_FORMAT bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
+        int fastPreset = 0;
+        ID3D11Device* device = nullptr;
+        ID3D11VideoDevice* videoDevice = nullptr;
+        ID3D11VideoContext* videoContext = nullptr;
+        ID3D11VideoProcessorEnumerator* videoEnumerator = nullptr;
+        ID3D11VideoProcessor* videoProcessor = nullptr;
+        ID3D11Texture2D* nv12Texture = nullptr;
+        ID3D11VideoProcessorOutputView* vpOutputView = nullptr;
         int width = 0;
         int height = 0;
         int fps = 30;
@@ -215,6 +223,8 @@ namespace
     bool ProcessAudioOutput(EncoderState* state);
     bool EncodeAudioFrame(EncoderState* state, const int16_t* pcm, uint32_t frameSamplesPerChannel);
     bool FlushAudio(EncoderState* state);
+    bool EnsureVideoProcessor(EncoderState* state);
+    ID3D11Texture2D* ConvertToNv12(EncoderState* state, ID3D11Texture2D* texture);
 
     void SetError(EncoderState* state, const std::wstring& message)
     {
@@ -1381,7 +1391,13 @@ namespace
         state->width = width;
         state->height = height;
         state->fps = fps;
-        state->bufferFormat = bufferFormat;
+        state->fastPreset = fastPreset;
+        state->bufferFormat = (fastPreset != 0) ? NV_ENC_BUFFER_FORMAT_NV12 : bufferFormat;
+        state->device = device;
+        if (state->device)
+        {
+            state->device->AddRef();
+        }
 
         // Load only from System32 to avoid DLL hijacking via current/plugin directories.
         state->nvencModule = LoadLibraryExW(L"nvEncodeAPI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -1493,8 +1509,17 @@ namespace
         return true;
     }
 
-    bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
-    {
+bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
+{
+        if (state->fastPreset != 0)
+        {
+            auto* converted = ConvertToNv12(state, texture);
+            if (converted)
+            {
+                texture = converted;
+            }
+        }
+
         NV_ENC_REGISTER_RESOURCE registerRes{};
         registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
         registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -1654,6 +1679,109 @@ namespace
         status = state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
         return CheckStatus(state, status, L"nvEncUnlockBitstream failed");
     }
+
+    bool EnsureVideoProcessor(EncoderState* state)
+    {
+        if (!state || !state->device)
+        {
+            return false;
+        }
+        if (state->videoProcessor && state->videoDevice && state->videoContext && state->videoEnumerator && state->nv12Texture && state->vpOutputView)
+        {
+            return true;
+        }
+
+        state->device->QueryInterface(__uuidof(ID3D11VideoDevice), reinterpret_cast<void**>(&state->videoDevice));
+        if (!state->videoDevice)
+        {
+            return false;
+        }
+
+        ID3D11DeviceContext* context = nullptr;
+        state->device->GetImmediateContext(&context);
+        if (context)
+        {
+            context->QueryInterface(__uuidof(ID3D11VideoContext), reinterpret_cast<void**>(&state->videoContext));
+            context->Release();
+        }
+        if (!state->videoContext)
+        {
+            return false;
+        }
+
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{};
+        desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        desc.InputWidth = static_cast<UINT>(state->width);
+        desc.InputHeight = static_cast<UINT>(state->height);
+        desc.OutputWidth = static_cast<UINT>(state->width);
+        desc.OutputHeight = static_cast<UINT>(state->height);
+        desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+        if (FAILED(state->videoDevice->CreateVideoProcessorEnumerator(&desc, &state->videoEnumerator)) || !state->videoEnumerator)
+        {
+            return false;
+        }
+
+        if (FAILED(state->videoDevice->CreateVideoProcessor(state->videoEnumerator, 0, &state->videoProcessor)) || !state->videoProcessor)
+        {
+            return false;
+        }
+
+        D3D11_TEXTURE2D_DESC texDesc{};
+        texDesc.Width = static_cast<UINT>(state->width);
+        texDesc.Height = static_cast<UINT>(state->height);
+        texDesc.MipLevels = 1;
+        texDesc.ArraySize = 1;
+        texDesc.Format = DXGI_FORMAT_NV12;
+        texDesc.SampleDesc.Count = 1;
+        texDesc.Usage = D3D11_USAGE_DEFAULT;
+        texDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(state->device->CreateTexture2D(&texDesc, nullptr, &state->nv12Texture)) || !state->nv12Texture)
+        {
+            return false;
+        }
+
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outDesc{};
+        outDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        outDesc.Texture2D.MipSlice = 0;
+        if (FAILED(state->videoDevice->CreateVideoProcessorOutputView(state->nv12Texture, state->videoEnumerator, &outDesc, &state->vpOutputView)) || !state->vpOutputView)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    ID3D11Texture2D* ConvertToNv12(EncoderState* state, ID3D11Texture2D* texture)
+    {
+        if (!state || !texture)
+        {
+            return nullptr;
+        }
+        if (!EnsureVideoProcessor(state))
+        {
+            return nullptr;
+        }
+
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inDesc{};
+        inDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        inDesc.Texture2D.MipSlice = 0;
+        inDesc.Texture2D.ArraySlice = 0;
+
+        ID3D11VideoProcessorInputView* inputView = nullptr;
+        if (FAILED(state->videoDevice->CreateVideoProcessorInputView(texture, state->videoEnumerator, &inDesc, &inputView)) || !inputView)
+        {
+            return nullptr;
+        }
+
+        D3D11_VIDEO_PROCESSOR_STREAM stream{};
+        stream.Enable = TRUE;
+        stream.pInputSurface = inputView;
+        state->videoContext->VideoProcessorBlt(state->videoProcessor, state->vpOutputView, 0, 1, &stream);
+        inputView->Release();
+
+        return state->nv12Texture;
+    }
 }
 
 void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, int bufferFormat, const wchar_t* outputPath)
@@ -1812,6 +1940,42 @@ void NvencDestroy(void* handle)
     {
         FreeLibrary(state->nvencModule);
         state->nvencModule = nullptr;
+    }
+
+    if (state->vpOutputView)
+    {
+        state->vpOutputView->Release();
+        state->vpOutputView = nullptr;
+    }
+    if (state->nv12Texture)
+    {
+        state->nv12Texture->Release();
+        state->nv12Texture = nullptr;
+    }
+    if (state->videoProcessor)
+    {
+        state->videoProcessor->Release();
+        state->videoProcessor = nullptr;
+    }
+    if (state->videoEnumerator)
+    {
+        state->videoEnumerator->Release();
+        state->videoEnumerator = nullptr;
+    }
+    if (state->videoContext)
+    {
+        state->videoContext->Release();
+        state->videoContext = nullptr;
+    }
+    if (state->videoDevice)
+    {
+        state->videoDevice->Release();
+        state->videoDevice = nullptr;
+    }
+    if (state->device)
+    {
+        state->device->Release();
+        state->device = nullptr;
     }
 
     delete state;
