@@ -459,28 +459,7 @@ namespace
             return false;
         }
 
-        IMFMediaType* currentType = nullptr;
-        hr = state->aacEncoder->GetOutputCurrentType(0, &currentType);
-        if (SUCCEEDED(hr) && currentType)
-        {
-            UINT32 blobSize = 0;
-            if (SUCCEEDED(currentType->GetBlobSize(MF_MT_USER_DATA, &blobSize)) && blobSize > 0)
-            {
-                state->audioSpecificConfig.resize(blobSize);
-                currentType->GetBlob(MF_MT_USER_DATA, state->audioSpecificConfig.data(), blobSize, nullptr);
-            }
-            else if (SUCCEEDED(currentType->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &blobSize)) && blobSize > 0)
-            {
-                state->audioSpecificConfig.resize(blobSize);
-                currentType->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, state->audioSpecificConfig.data(), blobSize, nullptr);
-            }
-            currentType->Release();
-        }
-
-        if (state->audioSpecificConfig.empty())
-        {
-            state->audioSpecificConfig = BuildAacSpecificConfig(sampleRate, channels);
-        }
+        state->audioSpecificConfig = BuildAacSpecificConfig(sampleRate, channels);
 
         state->aacEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         state->aacEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
@@ -1474,16 +1453,18 @@ namespace
         state->config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
         state->config.rcParams.averageBitRate = static_cast<uint32_t>(bitrateKbps) * 1000;
         state->config.rcParams.maxBitRate = state->config.rcParams.averageBitRate;
-        state->config.gopLength = NVENC_INFINITE_GOPLENGTH;
+        state->config.gopLength = state->fps * 2;
         state->config.frameIntervalP = 1;
 
         if (codec == 1)
         {
             state->config.encodeCodecConfig.hevcConfig.repeatSPSPPS = 1;
+            state->config.encodeCodecConfig.hevcConfig.idrPeriod = state->config.gopLength;
         }
         else
         {
             state->config.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
+            state->config.encodeCodecConfig.h264Config.idrPeriod = state->config.gopLength;
         }
 
         status = state->funcs.nvEncInitializeEncoder(state->session, &state->initParams);
