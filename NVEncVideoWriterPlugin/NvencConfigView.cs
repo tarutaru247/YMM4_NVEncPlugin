@@ -93,12 +93,6 @@ internal sealed class NvencConfigView : UserControl
         };
         panel.Children.Add(_bitrateTextBox);
 
-        panel.Children.Add(new TextBlock
-        {
-            Text = "※ 現時点は映像のみ出力（音声は無視）",
-            Opacity = 0.7,
-        });
-
         Content = panel;
     }
 }
