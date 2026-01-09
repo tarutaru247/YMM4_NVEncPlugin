@@ -459,12 +459,34 @@ namespace
             return false;
         }
 
+        IMFMediaType* currentType = nullptr;
+        hr = state->aacEncoder->GetOutputCurrentType(0, &currentType);
+        if (SUCCEEDED(hr) && currentType)
+        {
+            UINT32 blobSize = 0;
+            if (SUCCEEDED(currentType->GetBlobSize(MF_MT_USER_DATA, &blobSize)) && blobSize > 0)
+            {
+                state->audioSpecificConfig.resize(blobSize);
+                currentType->GetBlob(MF_MT_USER_DATA, state->audioSpecificConfig.data(), blobSize, nullptr);
+            }
+            else if (SUCCEEDED(currentType->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &blobSize)) && blobSize > 0)
+            {
+                state->audioSpecificConfig.resize(blobSize);
+                currentType->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, state->audioSpecificConfig.data(), blobSize, nullptr);
+            }
+            currentType->Release();
+        }
+
+        if (state->audioSpecificConfig.empty())
+        {
+            state->audioSpecificConfig = BuildAacSpecificConfig(sampleRate, channels);
+        }
+
         state->aacEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         state->aacEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
         state->audioSampleRate = sampleRate;
         state->audioChannels = channels;
-        state->audioSpecificConfig = BuildAacSpecificConfig(sampleRate, channels);
         state->audioInitialized = true;
         return true;
     }
@@ -903,8 +925,6 @@ namespace
         moov.WriteU16(1);
         moov.WriteU16(0);
         moov.WriteU16(0);
-        moov.WriteU32(0);
-        moov.WriteU32(0);
         moov.WriteU16(static_cast<uint16_t>(channels));
         moov.WriteU16(16);
         moov.WriteU16(0);
