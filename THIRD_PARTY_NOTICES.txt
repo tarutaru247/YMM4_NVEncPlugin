@@ -1,0 +1,13 @@
+Third-Party Notices
+===================
+
+This project uses or depends on the following third-party components.
+These components are NOT redistributed within this repository.
+
+1) NVIDIA NVENC SDK
+   - Usage: NVENC API headers are required to build the native encoder module.
+   - Distribution: Not included. Obtain the SDK from NVIDIA and follow its EULA.
+
+2) YukkuriMovieMaker v4 (YMM4)
+   - Usage: This is a plugin for YMM4 and references YMM4 assemblies at build/runtime.
+   - Distribution: Not included. Use and distribution must comply with YMM4's terms.

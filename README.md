@@ -20,5 +20,9 @@ YMM4向けのNVENC対応動画出力プラグインです。H.264 / H.265 のMP4
 ## ライセンス
 MIT License
 
+## 第三者ライセンス/依存関係
+- NVIDIA NVENC SDK を使用します（SDK 自体は同梱しません。入手と利用は NVIDIA の EULA に従ってください）
+- YukkuriMovieMaker v4 本体は同梱しません（本体の配布・利用は YMM4 の規約に従ってください）
+
 ## 作者
 たるたる @tarutaru247
