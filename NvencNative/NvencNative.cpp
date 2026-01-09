@@ -1442,7 +1442,7 @@ namespace
             ? NV_ENC_PRESET_P1_GUID
             : (quality <= 0 ? NV_ENC_PRESET_P1_GUID : (quality == 2 ? NV_ENC_PRESET_P7_GUID : NV_ENC_PRESET_P3_GUID));
         const NV_ENC_TUNING_INFO tuningInfo = (fastPreset != 0)
-            ? NV_ENC_TUNING_INFO_LOW_LATENCY
+            ? NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY
             : NV_ENC_TUNING_INFO_HIGH_QUALITY;
 
         NV_ENC_PRESET_CONFIG presetConfig{};
@@ -1479,6 +1479,14 @@ namespace
             : state->config.rcParams.averageBitRate;
         state->config.gopLength = state->fps * 2;
         state->config.frameIntervalP = 1;
+        if (fastPreset != 0)
+        {
+            state->config.gopLength = state->fps * 4;
+            state->config.rcParams.enableAQ = 0;
+            state->config.rcParams.enableTemporalAQ = 0;
+            state->config.rcParams.enableLookahead = 0;
+            state->config.rcParams.lookaheadDepth = 0;
+        }
 
         if (codec == 1)
         {
