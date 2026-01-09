@@ -15,7 +15,7 @@ public sealed class NvencVideoFileWriterPlugin : IVideoFileWriterPlugin
         ContentId = "NVEncVideoFileWriterPlugin",
     };
 
-    public string Name => "NVEncC 直接出力";
+    public string Name => "NVENC プラグイン出力";
 
     public PluginDetailsAttribute Details => _details;
 

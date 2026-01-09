@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
+    <AssemblyName>NVEncPlugin</AssemblyName>
 
     <!-- PDB にソースのフルパスを含めない -->
     <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\'))</RepoRoot>
@@ -48,7 +49,7 @@
 
   <!-- ビルド後に YMM4 のプラグインフォルダに dll をコピーする -->
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="mkdir &quot;$(YMM4DirPath)user\plugin\$(ProjectName)&quot; &gt; NUL 2&gt;&amp;1&#xD;&#xA;copy &quot;$(TargetPath)&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;&#xD;&#xA;if exist &quot;$(ProjectDir)..\NvencNative\bin\Release\NvencNative.dll&quot; copy &quot;$(ProjectDir)..\NvencNative\bin\Release\NvencNative.dll&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;&#xD;&#xA;if exist &quot;$(ProjectDir)..\README.md&quot; copy &quot;$(ProjectDir)..\README.md&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;" />
+    <Exec Command="mkdir &quot;$(YMM4DirPath)user\plugin\$(ProjectName)&quot; &gt; NUL 2&gt;&amp;1&#xD;&#xA;copy &quot;$(TargetPath)&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;&#xD;&#xA;if exist &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\NVEncVideoWriterPlugin.dll&quot; del /f /q &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\NVEncVideoWriterPlugin.dll&quot;&#xD;&#xA;if exist &quot;$(ProjectDir)..\NvencNative\bin\Release\NvencNative.dll&quot; copy &quot;$(ProjectDir)..\NvencNative\bin\Release\NvencNative.dll&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;&#xD;&#xA;if exist &quot;$(ProjectDir)..\README.md&quot; copy &quot;$(ProjectDir)..\README.md&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;" />
   </Target>
 
 </Project>
