@@ -1,5 +1,6 @@
 #include "NvencNative.h"
 
+#define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -7,10 +8,18 @@
 #include <vector>
 #include <algorithm>
 
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mferror.h>
+#include <mftransform.h>
+
 #include "nvEncodeAPI.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "mf.lib")
 
 namespace
 {
@@ -112,6 +121,13 @@ namespace
             data.push_back(static_cast<uint8_t>(value & 0xFF));
         }
 
+        void WriteU24(uint32_t value)
+        {
+            data.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+            data.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+            data.push_back(static_cast<uint8_t>(value & 0xFF));
+        }
+
         void WriteU64(uint64_t value)
         {
             for (int i = 7; i >= 0; --i)
@@ -176,9 +192,29 @@ namespace
         std::vector<uint64_t> sampleOffsets;
         std::vector<uint32_t> syncSamples;
         std::vector<uint8_t> codecPrivate;
+        bool mfStarted = false;
+        bool comInitialized = false;
+        bool audioInitialized = false;
+        int audioSampleRate = 0;
+        int audioChannels = 0;
+        uint32_t audioBitrate = 192000;
+        uint64_t audioSampleTotal = 0;
+        uint64_t audioFrameIndex = 0;
+        std::vector<int16_t> audioPcmBuffer;
+        size_t audioPcmRead = 0;
+        std::vector<uint32_t> audioSampleSizes;
+        std::vector<uint64_t> audioSampleOffsets;
+        std::vector<uint32_t> audioSampleDurations;
+        std::vector<uint8_t> audioSpecificConfig;
+        IMFTransform* aacEncoder = nullptr;
         std::wstring outputPath;
         std::wstring lastError;
     };
+
+    std::vector<uint8_t> BuildAacSpecificConfig(int sampleRate, int channels);
+    bool ProcessAudioOutput(EncoderState* state);
+    bool EncodeAudioFrame(EncoderState* state, const int16_t* pcm, uint32_t frameSamplesPerChannel);
+    bool FlushAudio(EncoderState* state);
 
     void SetError(EncoderState* state, const std::wstring& message)
     {
@@ -201,6 +237,25 @@ namespace
         error += L")";
         SetError(state, error);
         return false;
+    }
+
+    int ClampInt(int value, int minValue, int maxValue)
+    {
+        if (value < minValue) return minValue;
+        if (value > maxValue) return maxValue;
+        return value;
+    }
+
+    float ClampFloat(float value, float minValue, float maxValue)
+    {
+        if (value < minValue) return minValue;
+        if (value > maxValue) return maxValue;
+        return value;
+    }
+
+    uint64_t MaxU64(uint64_t a, uint64_t b)
+    {
+        return a > b ? a : b;
     }
 
     bool WriteU32BE(FileWriter& file, uint32_t value)
@@ -247,6 +302,10 @@ namespace
     {
         if (state->writerInitialized)
         {
+            if (!codecPrivate.empty() && state->codecPrivate.empty())
+            {
+                state->codecPrivate = codecPrivate;
+            }
             return true;
         }
 
@@ -257,7 +316,10 @@ namespace
         }
 
         state->isHevc = hevc;
-        state->codecPrivate = codecPrivate;
+        if (!codecPrivate.empty())
+        {
+            state->codecPrivate = codecPrivate;
+        }
 
         if (!WriteFtyp(state->file, hevc))
         {
@@ -284,6 +346,354 @@ namespace
         return true;
     }
 
+    bool InitializeAudioEncoder(EncoderState* state, int sampleRate, int channels)
+    {
+        if (!state)
+        {
+            return false;
+        }
+
+        if (state->audioInitialized)
+        {
+            if (state->audioSampleRate != sampleRate || state->audioChannels != channels)
+            {
+                SetError(state, L"Audio format mismatch.");
+                return false;
+            }
+            return true;
+        }
+
+        HRESULT hr = MFStartup(MF_VERSION);
+        if (FAILED(hr))
+        {
+            SetError(state, L"MFStartup failed.");
+            return false;
+        }
+        state->mfStarted = true;
+
+        HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (SUCCEEDED(coHr))
+        {
+            state->comInitialized = true;
+        }
+
+        MFT_REGISTER_TYPE_INFO inputType = { MFMediaType_Audio, MFAudioFormat_PCM };
+        MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Audio, MFAudioFormat_AAC };
+        IMFActivate** activates = nullptr;
+        UINT32 count = 0;
+        hr = MFTEnumEx(
+            MFT_CATEGORY_AUDIO_ENCODER,
+            MFT_ENUM_FLAG_ALL,
+            &inputType,
+            &outputType,
+            &activates,
+            &count);
+
+        if (FAILED(hr) || count == 0)
+        {
+            if (activates)
+            {
+                CoTaskMemFree(activates);
+            }
+            SetError(state, L"AAC encoder not found.");
+            return false;
+        }
+
+        hr = activates[0]->ActivateObject(IID_PPV_ARGS(&state->aacEncoder));
+        for (UINT32 i = 0; i < count; ++i)
+        {
+            activates[i]->Release();
+        }
+        CoTaskMemFree(activates);
+
+        if (FAILED(hr))
+        {
+            SetError(state, L"Failed to activate AAC encoder.");
+            return false;
+        }
+
+        IMFMediaType* inType = nullptr;
+        hr = MFCreateMediaType(&inType);
+        if (FAILED(hr))
+        {
+            SetError(state, L"MFCreateMediaType failed.");
+            return false;
+        }
+        inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        inType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+        inType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate);
+        inType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels);
+        inType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        inType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, static_cast<UINT32>(channels * 2));
+        inType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, static_cast<UINT32>(sampleRate * channels * 2));
+
+        hr = state->aacEncoder->SetInputType(0, inType, 0);
+        inType->Release();
+        if (FAILED(hr))
+        {
+            SetError(state, L"AAC SetInputType failed.");
+            return false;
+        }
+
+        IMFMediaType* outType = nullptr;
+        hr = MFCreateMediaType(&outType);
+        if (FAILED(hr))
+        {
+            SetError(state, L"MFCreateMediaType failed.");
+            return false;
+        }
+        outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        outType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+        outType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate);
+        outType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels);
+        outType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        outType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, state->audioBitrate / 8);
+        outType->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
+        outType->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+
+        hr = state->aacEncoder->SetOutputType(0, outType, 0);
+        outType->Release();
+        if (FAILED(hr))
+        {
+            SetError(state, L"AAC SetOutputType failed.");
+            return false;
+        }
+
+        state->aacEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        state->aacEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+        state->audioSampleRate = sampleRate;
+        state->audioChannels = channels;
+        state->audioSpecificConfig = BuildAacSpecificConfig(sampleRate, channels);
+        state->audioInitialized = true;
+        return true;
+    }
+
+    bool ProcessAudioOutput(EncoderState* state)
+    {
+        if (!state || !state->aacEncoder)
+        {
+            return false;
+        }
+
+        MFT_OUTPUT_STREAM_INFO info{};
+        HRESULT hr = state->aacEncoder->GetOutputStreamInfo(0, &info);
+        if (FAILED(hr))
+        {
+            SetError(state, L"AAC GetOutputStreamInfo failed.");
+            return false;
+        }
+        if (info.cbSize == 0)
+        {
+            info.cbSize = 4096;
+        }
+
+        while (true)
+        {
+            IMFSample* outSample = nullptr;
+            IMFMediaBuffer* buffer = nullptr;
+
+            hr = MFCreateSample(&outSample);
+            if (FAILED(hr))
+            {
+                SetError(state, L"MFCreateSample failed.");
+                return false;
+            }
+
+            hr = MFCreateMemoryBuffer(info.cbSize, &buffer);
+            if (FAILED(hr))
+            {
+                outSample->Release();
+                SetError(state, L"MFCreateMemoryBuffer failed.");
+                return false;
+            }
+            outSample->AddBuffer(buffer);
+            buffer->Release();
+
+            MFT_OUTPUT_DATA_BUFFER output{};
+            output.pSample = outSample;
+            DWORD status = 0;
+            hr = state->aacEncoder->ProcessOutput(0, 1, &output, &status);
+            if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
+            {
+                IMFMediaType* newType = nullptr;
+                if (SUCCEEDED(state->aacEncoder->GetOutputAvailableType(0, 0, &newType)))
+                {
+                    state->aacEncoder->SetOutputType(0, newType, 0);
+                    newType->Release();
+                }
+                outSample->Release();
+                continue;
+            }
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT)
+            {
+                outSample->Release();
+                break;
+            }
+            if (FAILED(hr))
+            {
+                outSample->Release();
+                SetError(state, L"AAC ProcessOutput failed.");
+                return false;
+            }
+
+            IMFMediaBuffer* outBuffer = nullptr;
+            hr = outSample->GetBufferByIndex(0, &outBuffer);
+            if (FAILED(hr))
+            {
+                outSample->Release();
+                SetError(state, L"AAC GetBuffer failed.");
+                return false;
+            }
+
+            BYTE* data = nullptr;
+            DWORD maxLen = 0;
+            DWORD curLen = 0;
+            hr = outBuffer->Lock(&data, &maxLen, &curLen);
+            if (FAILED(hr))
+            {
+                outBuffer->Release();
+                outSample->Release();
+                SetError(state, L"AAC buffer lock failed.");
+                return false;
+            }
+
+            if (curLen > 0)
+            {
+                uint64_t offset = state->file.Tell();
+                if (!state->file.Write(data, curLen))
+                {
+                    outBuffer->Unlock();
+                    outBuffer->Release();
+                    outSample->Release();
+                    SetError(state, L"Failed to write audio sample.");
+                    return false;
+                }
+                state->audioSampleOffsets.push_back(offset);
+                state->audioSampleSizes.push_back(curLen);
+            }
+
+            outBuffer->Unlock();
+            outBuffer->Release();
+            outSample->Release();
+        }
+
+        return true;
+    }
+
+    bool EncodeAudioFrame(EncoderState* state, const int16_t* pcm, uint32_t frameSamplesPerChannel)
+    {
+        if (!state || !state->aacEncoder)
+        {
+            return false;
+        }
+
+        const uint32_t channels = static_cast<uint32_t>(state->audioChannels);
+        const uint32_t sampleCount = frameSamplesPerChannel * channels;
+        const uint32_t byteCount = sampleCount * 2;
+
+        IMFSample* sample = nullptr;
+        IMFMediaBuffer* buffer = nullptr;
+        HRESULT hr = MFCreateSample(&sample);
+        if (FAILED(hr))
+        {
+            SetError(state, L"MFCreateSample failed.");
+            return false;
+        }
+
+        hr = MFCreateMemoryBuffer(byteCount, &buffer);
+        if (FAILED(hr))
+        {
+            sample->Release();
+            SetError(state, L"MFCreateMemoryBuffer failed.");
+            return false;
+        }
+
+        BYTE* dest = nullptr;
+        DWORD maxLen = 0;
+        DWORD curLen = 0;
+        hr = buffer->Lock(&dest, &maxLen, &curLen);
+        if (FAILED(hr))
+        {
+            buffer->Release();
+            sample->Release();
+            SetError(state, L"Audio buffer lock failed.");
+            return false;
+        }
+
+        memcpy(dest, pcm, byteCount);
+        buffer->Unlock();
+        buffer->SetCurrentLength(byteCount);
+        sample->AddBuffer(buffer);
+        buffer->Release();
+
+        const LONGLONG duration = static_cast<LONGLONG>(frameSamplesPerChannel) * 10000000LL / state->audioSampleRate;
+        const LONGLONG time = static_cast<LONGLONG>(state->audioFrameIndex) * duration;
+        sample->SetSampleTime(time);
+        sample->SetSampleDuration(duration);
+        state->audioFrameIndex++;
+
+        hr = state->aacEncoder->ProcessInput(0, sample, 0);
+        if (hr == MF_E_NOTACCEPTING)
+        {
+            if (!ProcessAudioOutput(state))
+            {
+                sample->Release();
+                return false;
+            }
+            hr = state->aacEncoder->ProcessInput(0, sample, 0);
+        }
+        sample->Release();
+
+        if (FAILED(hr))
+        {
+            SetError(state, L"AAC ProcessInput failed.");
+            return false;
+        }
+
+        if (!ProcessAudioOutput(state))
+        {
+            return false;
+        }
+
+        state->audioSampleDurations.push_back(frameSamplesPerChannel);
+        state->audioSampleTotal += frameSamplesPerChannel;
+        return true;
+    }
+
+    bool FlushAudio(EncoderState* state)
+    {
+        if (!state || !state->audioInitialized || !state->aacEncoder)
+        {
+            return true;
+        }
+
+        const uint32_t frameSamples = 1024;
+        const uint32_t channels = static_cast<uint32_t>(state->audioChannels);
+        const uint32_t frameCount = frameSamples * channels;
+
+        if (state->audioPcmBuffer.size() > state->audioPcmRead)
+        {
+            size_t remain = state->audioPcmBuffer.size() - state->audioPcmRead;
+            std::vector<int16_t> frame(frameCount, 0);
+            size_t toCopy = std::min<size_t>(remain, frameCount);
+            memcpy(frame.data(), state->audioPcmBuffer.data() + state->audioPcmRead, toCopy * sizeof(int16_t));
+            if (!EncodeAudioFrame(state, frame.data(), frameSamples))
+            {
+                return false;
+            }
+            state->audioPcmRead += toCopy;
+        }
+
+        state->aacEncoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+        if (!ProcessAudioOutput(state))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
     void WriteMatrix(Mp4Buffer& buffer)
     {
         buffer.WriteU32(0x00010000);
@@ -297,6 +707,272 @@ namespace
         buffer.WriteU32(0x40000000);
     }
 
+    void WriteDescriptorSize(Mp4Buffer& buffer, size_t size)
+    {
+        uint8_t bytes[4] = {};
+        int count = 0;
+        do
+        {
+            bytes[count++] = static_cast<uint8_t>(size & 0x7F);
+            size >>= 7;
+        } while (size > 0 && count < 4);
+
+        for (int i = count - 1; i >= 0; --i)
+        {
+            uint8_t value = bytes[i];
+            if (i != 0)
+            {
+                value |= 0x80;
+            }
+            buffer.WriteU8(value);
+        }
+    }
+
+    void WriteDescriptor(Mp4Buffer& buffer, uint8_t tag, const std::vector<uint8_t>& payload)
+    {
+        buffer.WriteU8(tag);
+        WriteDescriptorSize(buffer, payload.size());
+        buffer.WriteBytes(payload);
+    }
+
+    std::vector<uint8_t> BuildAacSpecificConfig(int sampleRate, int channels)
+    {
+        int sampleRateIndex = 3;
+        struct RateMap { int rate; int index; };
+        const RateMap rates[] = {
+            { 96000, 0 }, { 88200, 1 }, { 64000, 2 }, { 48000, 3 }, { 44100, 4 }, { 32000, 5 },
+            { 24000, 6 }, { 22050, 7 }, { 16000, 8 }, { 12000, 9 }, { 11025, 10 }, { 8000, 11 }, { 7350, 12 }
+        };
+        for (const auto& r : rates)
+        {
+            if (r.rate == sampleRate)
+            {
+                sampleRateIndex = r.index;
+                break;
+            }
+        }
+
+        const uint8_t audioObjectType = 2; // AAC LC
+        const uint8_t channelConfig = static_cast<uint8_t>(ClampInt(channels, 1, 7));
+
+        std::vector<uint8_t> asc;
+        asc.resize(2);
+        asc[0] = static_cast<uint8_t>((audioObjectType << 3) | ((sampleRateIndex & 0x0E) >> 1));
+        asc[1] = static_cast<uint8_t>(((sampleRateIndex & 0x01) << 7) | (channelConfig << 3));
+        return asc;
+    }
+
+    std::vector<uint8_t> BuildEsds(const std::vector<uint8_t>& asc, uint32_t bitrate)
+    {
+        Mp4Buffer esds;
+        esds.WriteU32(0);
+
+        Mp4Buffer decSpecific;
+        decSpecific.WriteBytes(asc);
+
+        Mp4Buffer decConfig;
+        decConfig.WriteU8(0x40); // objectTypeIndication
+        decConfig.WriteU8(0x15); // streamType audio
+        decConfig.WriteU24(0);   // bufferSizeDB
+        decConfig.WriteU32(bitrate);
+        decConfig.WriteU32(bitrate);
+        WriteDescriptor(decConfig, 0x05, decSpecific.data);
+
+        Mp4Buffer slConfig;
+        slConfig.WriteU8(0x02);
+
+        Mp4Buffer esDesc;
+        esDesc.WriteU16(1);
+        esDesc.WriteU8(0);
+        WriteDescriptor(esDesc, 0x04, decConfig.data);
+        WriteDescriptor(esDesc, 0x06, slConfig.data);
+
+        WriteDescriptor(esds, 0x03, esDesc.data);
+        return esds.data;
+    }
+
+    void WriteStts(Mp4Buffer& buffer, const std::vector<uint32_t>& durations)
+    {
+        size_t sttsStart = buffer.BeginBox("stts");
+        buffer.WriteU32(0);
+        if (durations.empty())
+        {
+            buffer.WriteU32(0);
+            buffer.EndBox(sttsStart);
+            return;
+        }
+
+        struct Entry { uint32_t count; uint32_t duration; };
+        std::vector<Entry> entries;
+        for (uint32_t d : durations)
+        {
+            if (entries.empty() || entries.back().duration != d)
+            {
+                entries.push_back({ 1, d });
+            }
+            else
+            {
+                entries.back().count++;
+            }
+        }
+
+        buffer.WriteU32(static_cast<uint32_t>(entries.size()));
+        for (const auto& e : entries)
+        {
+            buffer.WriteU32(e.count);
+            buffer.WriteU32(e.duration);
+        }
+        buffer.EndBox(sttsStart);
+    }
+
+    void AppendAudioTrak(Mp4Buffer& moov, const EncoderState* state, uint32_t trackId)
+    {
+        const uint32_t timescale = static_cast<uint32_t>(state->audioSampleRate);
+        const uint64_t duration = state->audioSampleTotal;
+        const uint32_t sampleCount = static_cast<uint32_t>(state->audioSampleSizes.size());
+        const uint32_t channels = static_cast<uint32_t>(state->audioChannels);
+
+        size_t trakStart = moov.BeginBox("trak");
+
+        size_t tkhdStart = moov.BeginBox("tkhd");
+        moov.WriteU32(0x00000007);
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU32(trackId);
+        moov.WriteU32(0);
+        moov.WriteU32(static_cast<uint32_t>(duration));
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU16(0);
+        moov.WriteU16(0);
+        moov.WriteU16(0x0100);
+        moov.WriteU16(0);
+        WriteMatrix(moov);
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.EndBox(tkhdStart);
+
+        size_t mdiaStart = moov.BeginBox("mdia");
+
+        size_t mdhdStart = moov.BeginBox("mdhd");
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU32(timescale);
+        moov.WriteU32(static_cast<uint32_t>(duration));
+        moov.WriteU16(0);
+        moov.WriteU16(0);
+        moov.EndBox(mdhdStart);
+
+        size_t hdlrStart = moov.BeginBox("hdlr");
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteString4("soun");
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        const char handlerName[] = "SoundHandler";
+        moov.data.insert(moov.data.end(), handlerName, handlerName + sizeof(handlerName));
+        moov.EndBox(hdlrStart);
+
+        size_t minfStart = moov.BeginBox("minf");
+
+        size_t smhdStart = moov.BeginBox("smhd");
+        moov.WriteU32(0);
+        moov.WriteU16(0);
+        moov.WriteU16(0);
+        moov.EndBox(smhdStart);
+
+        size_t dinfStart = moov.BeginBox("dinf");
+        size_t drefStart = moov.BeginBox("dref");
+        moov.WriteU32(0);
+        moov.WriteU32(1);
+        size_t urlStart = moov.BeginBox("url ");
+        moov.WriteU32(0x00000001);
+        moov.EndBox(urlStart);
+        moov.EndBox(drefStart);
+        moov.EndBox(dinfStart);
+
+        size_t stblStart = moov.BeginBox("stbl");
+
+        size_t stsdStart = moov.BeginBox("stsd");
+        moov.WriteU32(0);
+        moov.WriteU32(1);
+        size_t mp4aStart = moov.BeginBox("mp4a");
+        for (int i = 0; i < 6; ++i) moov.WriteU8(0);
+        moov.WriteU16(1);
+        moov.WriteU16(0);
+        moov.WriteU16(0);
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU16(static_cast<uint16_t>(channels));
+        moov.WriteU16(16);
+        moov.WriteU16(0);
+        moov.WriteU16(0);
+        moov.WriteU32(static_cast<uint32_t>(timescale) << 16);
+
+        auto esds = BuildEsds(state->audioSpecificConfig, state->audioBitrate);
+        size_t esdsStart = moov.BeginBox("esds");
+        moov.WriteBytes(esds);
+        moov.EndBox(esdsStart);
+
+        moov.EndBox(mp4aStart);
+        moov.EndBox(stsdStart);
+
+        WriteStts(moov, state->audioSampleDurations);
+
+        size_t stscStart = moov.BeginBox("stsc");
+        moov.WriteU32(0);
+        moov.WriteU32(1);
+        moov.WriteU32(1);
+        moov.WriteU32(1);
+        moov.WriteU32(1);
+        moov.EndBox(stscStart);
+
+        size_t stszStart = moov.BeginBox("stsz");
+        moov.WriteU32(0);
+        moov.WriteU32(0);
+        moov.WriteU32(sampleCount);
+        for (uint32_t size : state->audioSampleSizes)
+        {
+            moov.WriteU32(size);
+        }
+        moov.EndBox(stszStart);
+
+        bool useCo64 = false;
+        for (uint64_t offset : state->audioSampleOffsets)
+        {
+            if (offset > 0xFFFFFFFFu)
+            {
+                useCo64 = true;
+                break;
+            }
+        }
+        size_t stcoStart = moov.BeginBox(useCo64 ? "co64" : "stco");
+        moov.WriteU32(0);
+        moov.WriteU32(sampleCount);
+        if (useCo64)
+        {
+            for (uint64_t offset : state->audioSampleOffsets)
+            {
+                moov.WriteU64(offset);
+            }
+        }
+        else
+        {
+            for (uint64_t offset : state->audioSampleOffsets)
+            {
+                moov.WriteU32(static_cast<uint32_t>(offset));
+            }
+        }
+        moov.EndBox(stcoStart);
+
+        moov.EndBox(stblStart);
+        moov.EndBox(minfStart);
+        moov.EndBox(mdiaStart);
+        moov.EndBox(trakStart);
+    }
+
     std::vector<uint8_t> BuildMoov(const EncoderState* state)
     {
         Mp4Buffer moov;
@@ -305,7 +981,13 @@ namespace
         const uint32_t fps = state->fps > 0 ? static_cast<uint32_t>(state->fps) : 30;
         const uint32_t frameDuration = timescale / fps;
         const uint32_t sampleCount = static_cast<uint32_t>(state->sampleSizes.size());
-        const uint64_t duration = static_cast<uint64_t>(frameDuration) * sampleCount;
+        const uint64_t videoDuration = static_cast<uint64_t>(frameDuration) * sampleCount;
+        uint64_t audioDuration = 0;
+        if (state->audioSampleRate > 0)
+        {
+            audioDuration = state->audioSampleTotal * timescale / static_cast<uint64_t>(state->audioSampleRate);
+        }
+        const uint64_t duration = MaxU64(videoDuration, audioDuration);
 
         size_t moovStart = moov.BeginBox("moov");
 
@@ -325,7 +1007,8 @@ namespace
         {
             moov.WriteU32(0);
         }
-        moov.WriteU32(2);
+        uint32_t nextTrackId = state->audioSampleSizes.empty() ? 2 : 3;
+        moov.WriteU32(nextTrackId);
         moov.EndBox(mvhdStart);
 
         size_t trakStart = moov.BeginBox("trak");
@@ -493,6 +1176,11 @@ namespace
         moov.EndBox(minfStart);
         moov.EndBox(mdiaStart);
         moov.EndBox(trakStart);
+
+        if (!state->audioSampleSizes.empty() && !state->audioSpecificConfig.empty())
+        {
+            AppendAudioTrak(moov, state, 2);
+        }
         moov.EndBox(moovStart);
 
         return moov.data;
@@ -503,6 +1191,17 @@ namespace
         if (!state->writerInitialized || state->mp4Finalized)
         {
             return true;
+        }
+
+        if (!FlushAudio(state))
+        {
+            return false;
+        }
+
+        if (state->codecPrivate.empty())
+        {
+            SetError(state, L"Video codec header not found.");
+            return false;
         }
 
         uint64_t dataEnd = state->file.Tell();
@@ -902,6 +1601,14 @@ namespace
                 return false;
             }
         }
+        else if (state->codecPrivate.empty())
+        {
+            std::vector<uint8_t> codecPrivate = hevc ? BuildHvcC(vps, sps, pps) : BuildAvcC(sps, pps);
+            if (!codecPrivate.empty())
+            {
+                state->codecPrivate = codecPrivate;
+            }
+        }
 
         if (buffer.empty())
         {
@@ -951,6 +1658,12 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
         return state;
     }
 
+    std::vector<uint8_t> empty;
+    if (!InitializeMp4Writer(state, codec == 1, empty))
+    {
+        return state;
+    }
+
     return state;
 }
 
@@ -965,6 +1678,50 @@ int NvencEncode(void* handle, ID3D11Texture2D* texture)
     if (!EncodeTexture(state, texture))
     {
         return 0;
+    }
+
+    return 1;
+}
+
+int NvencWriteAudio(void* handle, const float* samples, int sampleCount, int sampleRate, int channels)
+{
+    auto* state = reinterpret_cast<EncoderState*>(handle);
+    if (!state || !samples || sampleCount <= 0)
+    {
+        return 1;
+    }
+
+    if (!InitializeAudioEncoder(state, sampleRate, channels))
+    {
+        return 0;
+    }
+
+    const uint32_t frameSamples = 1024;
+    state->audioPcmBuffer.reserve(state->audioPcmBuffer.size() + static_cast<size_t>(sampleCount));
+    for (int i = 0; i < sampleCount; ++i)
+    {
+        float v = samples[i];
+        v = ClampFloat(v, -1.0f, 1.0f);
+        int16_t s = static_cast<int16_t>(v * 32767.0f);
+        state->audioPcmBuffer.push_back(s);
+    }
+
+    const uint32_t channelsCount = static_cast<uint32_t>(channels);
+    const size_t frameCount = static_cast<size_t>(frameSamples) * channelsCount;
+    while (state->audioPcmBuffer.size() - state->audioPcmRead >= frameCount)
+    {
+        const int16_t* frame = state->audioPcmBuffer.data() + state->audioPcmRead;
+        if (!EncodeAudioFrame(state, frame, frameSamples))
+        {
+            return 0;
+        }
+        state->audioPcmRead += frameCount;
+    }
+
+    if (state->audioPcmRead > 0 && state->audioPcmRead > 8192)
+    {
+        state->audioPcmBuffer.erase(state->audioPcmBuffer.begin(), state->audioPcmBuffer.begin() + static_cast<long long>(state->audioPcmRead));
+        state->audioPcmRead = 0;
     }
 
     return 1;
@@ -1018,6 +1775,24 @@ void NvencDestroy(void* handle)
     if (!state->mp4Finalized)
     {
         FinalizeMp4(state);
+    }
+
+    if (state->aacEncoder)
+    {
+        state->aacEncoder->Release();
+        state->aacEncoder = nullptr;
+    }
+
+    if (state->mfStarted)
+    {
+        MFShutdown();
+        state->mfStarted = false;
+    }
+
+    if (state->comInitialized)
+    {
+        CoUninitialize();
+        state->comInitialized = false;
     }
 
     if (state->nvencModule)

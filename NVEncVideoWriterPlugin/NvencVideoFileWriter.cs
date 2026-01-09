@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Vortice.Direct2D1;
 using Vortice.Direct3D11;
@@ -22,11 +23,25 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
         _settings = settings;
     }
 
-    public VideoFileWriterSupportedStreams SupportedStreams => VideoFileWriterSupportedStreams.Video;
+    public VideoFileWriterSupportedStreams SupportedStreams => VideoFileWriterSupportedStreams.Audio | VideoFileWriterSupportedStreams.Video;
+
+    private readonly List<float> _pendingAudio = new();
 
     public void WriteAudio(float[] samples)
     {
-        // Audio is intentionally ignored for now.
+        EnsureNotDisposed();
+        if (samples == null || samples.Length == 0)
+        {
+            return;
+        }
+
+        if (_encoderHandle == IntPtr.Zero)
+        {
+            _pendingAudio.AddRange(samples);
+            return;
+        }
+
+        WriteAudioInternal(samples);
     }
 
     public void WriteVideo(byte[] frame)
@@ -118,6 +133,24 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             NvencNativeMethods.NvencDestroy(_encoderHandle);
             _encoderHandle = IntPtr.Zero;
             throw new InvalidOperationException(error);
+        }
+
+        if (_pendingAudio.Count > 0)
+        {
+            var buffer = _pendingAudio.ToArray();
+            _pendingAudio.Clear();
+            WriteAudioInternal(buffer);
+        }
+    }
+
+    private void WriteAudioInternal(float[] samples)
+    {
+        var sampleRate = Math.Max(8000, _videoInfo.Hz);
+        const int channels = 2;
+        var result = NvencNativeMethods.NvencWriteAudio(_encoderHandle, samples, samples.Length, sampleRate, channels);
+        if (result == 0)
+        {
+            throw new InvalidOperationException(GetNativeError());
         }
     }
 

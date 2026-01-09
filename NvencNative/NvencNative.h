@@ -18,6 +18,8 @@ extern "C" {
 
     __declspec(dllexport) int NvencEncode(void* handle, ID3D11Texture2D* texture);
 
+    __declspec(dllexport) int NvencWriteAudio(void* handle, const float* samples, int sampleCount, int sampleRate, int channels);
+
     __declspec(dllexport) int NvencFinalize(void* handle);
 
     __declspec(dllexport) void NvencDestroy(void* handle);

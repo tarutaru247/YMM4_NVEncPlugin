@@ -9,3 +9,4 @@
 
 ## 注意
 - NVENC SDK / NVIDIA ドライバが必要です
+- 音声は AAC 固定（Media Foundation の AAC エンコーダを使用）

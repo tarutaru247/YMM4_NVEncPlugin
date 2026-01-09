@@ -19,6 +19,9 @@ internal static class NvencNativeMethods
     public static extern int NvencEncode(IntPtr handle, IntPtr texture);
 
     [DllImport("NvencNative.dll")]
+    public static extern int NvencWriteAudio(IntPtr handle, float[] samples, int sampleCount, int sampleRate, int channels);
+
+    [DllImport("NvencNative.dll")]
     public static extern int NvencFinalize(IntPtr handle);
 
     [DllImport("NvencNative.dll")]
