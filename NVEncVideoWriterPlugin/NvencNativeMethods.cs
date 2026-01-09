@@ -13,6 +13,8 @@ internal static class NvencNativeMethods
         int bitrateKbps,
         int codec,
         int quality,
+        int rateControlMode,
+        int maxBitrateKbps,
         int bufferFormat,
         string outputPath);
 

@@ -6,6 +6,7 @@ namespace NVEncVideoWriterPlugin;
 internal sealed class NvencConfigView : UserControl
 {
     private readonly ComboBox _codecComboBox;
+    private readonly ComboBox _rateControlComboBox;
     private readonly TextBox _bitrateTextBox;
     private readonly ComboBox _qualityComboBox;
     private readonly NvencSettings _settings;
@@ -35,6 +36,24 @@ internal sealed class NvencConfigView : UserControl
             _settings.Codec = _codecComboBox.SelectedIndex == 1 ? NvencCodec.H265 : NvencCodec.H264;
         };
         panel.Children.Add(_codecComboBox);
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = "ビットレート方式",
+            Margin = new Thickness(0, 0, 0, 4),
+        });
+
+        _rateControlComboBox = new ComboBox
+        {
+            Margin = new Thickness(0, 0, 0, 12),
+            ItemsSource = new[] { "固定 (CBR)", "可変 (VBR)" },
+            SelectedIndex = _settings.RateControl == NvencRateControl.Variable ? 1 : 0,
+        };
+        _rateControlComboBox.SelectionChanged += (_, _) =>
+        {
+            _settings.RateControl = _rateControlComboBox.SelectedIndex == 1 ? NvencRateControl.Variable : NvencRateControl.Fixed;
+        };
+        panel.Children.Add(_rateControlComboBox);
 
         panel.Children.Add(new TextBlock
         {

@@ -6,6 +6,7 @@ internal sealed class NvencSettings
     public int BitrateKbps { get; set; } = 8000;
     public string? NvencPath { get; set; }
     public NvencQuality Quality { get; set; } = NvencQuality.Balanced;
+    public NvencRateControl RateControl { get; set; } = NvencRateControl.Fixed;
 }
 
 internal enum NvencCodec
@@ -19,4 +20,10 @@ internal enum NvencQuality
     Speed,
     Balanced,
     Quality,
+}
+
+internal enum NvencRateControl
+{
+    Fixed,
+    Variable,
 }

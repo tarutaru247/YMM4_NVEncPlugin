@@ -111,6 +111,10 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
         var bitrate = Math.Clamp(_settings.BitrateKbps, 100, 200000);
         var codec = _settings.Codec == NvencCodec.H265 ? 1 : 0;
         var quality = (int)_settings.Quality;
+        var rateControl = _settings.RateControl == NvencRateControl.Variable ? 1 : 0;
+        var maxBitrate = rateControl == 1
+            ? Math.Clamp((int)(bitrate * 1.2), 100, 300000)
+            : bitrate;
         var bufferFormat = ResolveBufferFormat(texture);
 
         _encoderHandle = NvencNativeMethods.NvencCreate(
@@ -121,6 +125,8 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             bitrate,
             codec,
             quality,
+            rateControl,
+            maxBitrate,
             bufferFormat,
             _outputPath);
 

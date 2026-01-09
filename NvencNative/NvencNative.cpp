@@ -1376,7 +1376,7 @@ namespace
     }
 
 
-    bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, NV_ENC_BUFFER_FORMAT bufferFormat)
+    bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int rateControlMode, int maxBitrateKbps, NV_ENC_BUFFER_FORMAT bufferFormat)
     {
         state->width = width;
         state->height = height;
@@ -1453,9 +1453,11 @@ namespace
         state->initParams.enableSubFrameWrite = 0;
         state->initParams.encodeConfig = &state->config;
 
-        state->config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+        state->config.rcParams.rateControlMode = (rateControlMode == 1) ? NV_ENC_PARAMS_RC_VBR : NV_ENC_PARAMS_RC_CBR;
         state->config.rcParams.averageBitRate = static_cast<uint32_t>(bitrateKbps) * 1000;
-        state->config.rcParams.maxBitRate = state->config.rcParams.averageBitRate;
+        state->config.rcParams.maxBitRate = (rateControlMode == 1 && maxBitrateKbps > 0)
+            ? static_cast<uint32_t>(maxBitrateKbps) * 1000
+            : state->config.rcParams.averageBitRate;
         state->config.gopLength = state->fps * 2;
         state->config.frameIntervalP = 1;
 
@@ -1647,7 +1649,7 @@ namespace
     }
 }
 
-void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int bufferFormat, const wchar_t* outputPath)
+void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int rateControlMode, int maxBitrateKbps, int bufferFormat, const wchar_t* outputPath)
 {
     if (!device || !outputPath)
     {
@@ -1657,7 +1659,7 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
     auto* state = new EncoderState();
     state->outputPath = outputPath;
 
-    if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, quality, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat)))
+    if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, quality, rateControlMode, maxBitrateKbps, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat)))
     {
         return state;
     }

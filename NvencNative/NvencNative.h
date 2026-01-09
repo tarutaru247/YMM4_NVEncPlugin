@@ -14,6 +14,8 @@ extern "C" {
         int bitrateKbps,
         int codec,
         int quality,
+        int rateControlMode,
+        int maxBitrateKbps,
         int bufferFormat,
         const wchar_t* outputPath);
 
