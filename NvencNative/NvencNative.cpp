@@ -571,6 +571,8 @@ namespace
                 }
                 state->audioSampleOffsets.push_back(offset);
                 state->audioSampleSizes.push_back(curLen);
+                state->audioSampleDurations.push_back(1024);
+                state->audioSampleTotal += 1024;
             }
 
             outBuffer->Unlock();
@@ -656,8 +658,6 @@ namespace
             return false;
         }
 
-        state->audioSampleDurations.push_back(frameSamplesPerChannel);
-        state->audioSampleTotal += frameSamplesPerChannel;
         return true;
     }
 
