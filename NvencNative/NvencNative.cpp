@@ -1481,6 +1481,10 @@ namespace
         state->config.frameIntervalP = 1;
         if (fastPreset != 0)
         {
+            state->initParams.enableSubFrameWrite = 1;
+        }
+        if (fastPreset != 0)
+        {
             state->config.gopLength = state->fps * 4;
             state->config.rcParams.enableAQ = 0;
             state->config.rcParams.enableTemporalAQ = 0;
