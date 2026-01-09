@@ -158,7 +158,7 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
     private void WriteAudioInternal(float[] samples)
     {
         var sampleRate = Math.Max(8000, _videoInfo.Hz);
-        const int channels = 2;
+        var channels = ResolveAudioChannels();
         var result = NvencNativeMethods.NvencWriteAudio(_encoderHandle, samples, samples.Length, sampleRate, channels);
         if (result == 0)
         {
@@ -187,6 +187,21 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             Format.R8G8B8A8_UNorm_SRgb => NvencBufferFormat.ABGR,
             _ => NvencBufferFormat.ARGB,
         };
+    }
+
+    private int ResolveAudioChannels()
+    {
+        const int fallback = 2;
+        var type = _videoInfo.GetType();
+        var prop = type.GetProperty("Channels")
+            ?? type.GetProperty("ChannelCount")
+            ?? type.GetProperty("AudioChannels")
+            ?? type.GetProperty("AudioChannelCount");
+        if (prop?.GetValue(_videoInfo) is int value && value > 0)
+        {
+            return value;
+        }
+        return fallback;
     }
 
     private int GetTargetBitrateKbps()

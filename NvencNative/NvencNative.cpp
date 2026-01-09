@@ -1531,6 +1531,10 @@ namespace
         status = state->funcs.nvEncEncodePicture(state->session, &pic);
         state->funcs.nvEncUnmapInputResource(state->session, map.mappedResource);
         state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
+        if (status == NV_ENC_ERR_NEED_MORE_INPUT)
+        {
+            return true;
+        }
         if (!CheckStatus(state, status, L"nvEncEncodePicture failed"))
         {
             return false;
