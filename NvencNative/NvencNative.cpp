@@ -904,6 +904,7 @@ namespace
         moov.WriteU16(1);
         moov.WriteU16(0);
         moov.WriteU16(0);
+        moov.WriteU32(0);
         moov.WriteU16(static_cast<uint16_t>(channels));
         moov.WriteU16(16);
         moov.WriteU16(0);
