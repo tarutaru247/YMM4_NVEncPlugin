@@ -46,12 +46,13 @@ internal sealed class NvencConfigView : UserControl
         _rateControlComboBox = new ComboBox
         {
             Margin = new Thickness(0, 0, 0, 12),
-            ItemsSource = new[] { "固定 (CBR)", "可変 (VBR)" },
-            SelectedIndex = _settings.RateControl == NvencRateControl.Variable ? 1 : 0,
-        };
-        _rateControlComboBox.SelectionChanged += (_, _) =>
-        {
-            _settings.RateControl = _rateControlComboBox.SelectedIndex == 1 ? NvencRateControl.Variable : NvencRateControl.Fixed;
+            ItemsSource = new[] { "固定 (CBR)", "可変 (VBR)", "自動 (YouTube 推奨)" },
+            SelectedIndex = _settings.RateControl switch
+            {
+                NvencRateControl.Variable => 1,
+                NvencRateControl.YouTubeRecommended => 2,
+                _ => 0,
+            },
         };
         panel.Children.Add(_rateControlComboBox);
 
@@ -83,6 +84,17 @@ internal sealed class NvencConfigView : UserControl
         {
             Text = _settings.BitrateKbps.ToString(),
             Margin = new Thickness(0, 0, 0, 8),
+            IsEnabled = _settings.RateControl != NvencRateControl.YouTubeRecommended,
+        };
+        _rateControlComboBox.SelectionChanged += (_, _) =>
+        {
+            _settings.RateControl = _rateControlComboBox.SelectedIndex switch
+            {
+                1 => NvencRateControl.Variable,
+                2 => NvencRateControl.YouTubeRecommended,
+                _ => NvencRateControl.Fixed,
+            };
+            _bitrateTextBox.IsEnabled = _settings.RateControl != NvencRateControl.YouTubeRecommended;
         };
         _bitrateTextBox.TextChanged += (_, _) =>
         {

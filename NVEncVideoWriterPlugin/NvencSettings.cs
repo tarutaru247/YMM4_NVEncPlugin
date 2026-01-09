@@ -26,4 +26,5 @@ internal enum NvencRateControl
 {
     Fixed,
     Variable,
+    YouTubeRecommended,
 }

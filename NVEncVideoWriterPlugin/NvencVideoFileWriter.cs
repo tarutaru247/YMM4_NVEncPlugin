@@ -108,10 +108,14 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
         }
 
         var fps = Math.Max(1, _videoInfo.FPS);
-        var bitrate = Math.Clamp(_settings.BitrateKbps, 100, 200000);
+        var bitrate = GetTargetBitrateKbps();
         var codec = _settings.Codec == NvencCodec.H265 ? 1 : 0;
         var quality = (int)_settings.Quality;
         var rateControl = _settings.RateControl == NvencRateControl.Variable ? 1 : 0;
+        if (_settings.RateControl == NvencRateControl.YouTubeRecommended)
+        {
+            rateControl = 1;
+        }
         var maxBitrate = rateControl == 1
             ? Math.Clamp((int)(bitrate * 1.2), 100, 300000)
             : bitrate;
@@ -183,6 +187,26 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             Format.R8G8B8A8_UNorm_SRgb => NvencBufferFormat.ABGR,
             _ => NvencBufferFormat.ARGB,
         };
+    }
+
+    private int GetTargetBitrateKbps()
+    {
+        if (_settings.RateControl != NvencRateControl.YouTubeRecommended)
+        {
+            return Math.Clamp(_settings.BitrateKbps, 100, 200000);
+        }
+
+        var height = Math.Max(_videoInfo.Width, _videoInfo.Height);
+        var highFps = _videoInfo.FPS >= 48;
+        int mbps = height switch
+        {
+            >= 2160 => highFps ? 60 : 40,
+            >= 1440 => highFps ? 24 : 16,
+            >= 1080 => highFps ? 12 : 8,
+            >= 720 => highFps ? 8 : 5,
+            _ => highFps ? 4 : 3,
+        };
+        return mbps * 1000;
     }
 
     private void EnsureNotDisposed()
