@@ -184,6 +184,7 @@ namespace
         NV_ENC_BUFFER_FORMAT originalBufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
         int fastPreset = 0;
         ID3D11Device* device = nullptr;
+        ID3D11DeviceContext* deviceContext = nullptr;
         ID3D11VideoDevice* videoDevice = nullptr;
         ID3D11VideoContext* videoContext = nullptr;
         ID3D11VideoProcessorEnumerator* videoEnumerator = nullptr;
@@ -191,6 +192,8 @@ namespace
         ID3D11Texture2D* nv12Texture = nullptr;
         ID3D11VideoProcessorOutputView* vpOutputView = nullptr;
         NV_ENC_REGISTERED_PTR registeredNv12 = nullptr;
+        ID3D11Texture2D* rgbTexture = nullptr;
+        NV_ENC_REGISTERED_PTR registeredRgb = nullptr;
         std::mutex fileMutex;
         std::mutex writerMutex;
         std::condition_variable writerCv;
@@ -202,6 +205,8 @@ namespace
         {
             std::vector<uint8_t> data;
             bool keyframe = false;
+            bool isAudio = false;
+            uint32_t audioDuration = 0;
         };
         std::deque<EncodedSample> sampleQueue;
         int width = 0;
@@ -242,6 +247,7 @@ namespace
     bool ProcessAudioOutput(EncoderState* state);
     bool EncodeAudioFrame(EncoderState* state, const int16_t* pcm, uint32_t frameSamplesPerChannel);
     bool FlushAudio(EncoderState* state);
+    bool EnsureRgbResource(EncoderState* state, ID3D11Texture2D* texture);
     bool EnsureVideoProcessor(EncoderState* state);
     ID3D11Texture2D* ConvertToNv12(EncoderState* state, ID3D11Texture2D* texture);
     void StartWriterThread(EncoderState* state);
@@ -592,20 +598,25 @@ namespace
 
             if (curLen > 0)
             {
-                std::lock_guard<std::mutex> lock(state->fileMutex);
-                uint64_t offset = state->file.Tell();
-                if (!state->file.Write(data, curLen))
+                if (!state->writerStarted)
+                {
+                    StartWriterThread(state);
+                }
+                if (state->writerError)
                 {
                     outBuffer->Unlock();
                     outBuffer->Release();
                     outSample->Release();
-                    SetError(state, L"Failed to write audio sample.");
+                    SetError(state, L"Writer thread error.");
                     return false;
                 }
-                state->audioSampleOffsets.push_back(offset);
-                state->audioSampleSizes.push_back(curLen);
-                state->audioSampleDurations.push_back(1024);
-                state->audioSampleTotal += 1024;
+
+                std::vector<uint8_t> payload(data, data + curLen);
+                {
+                    std::lock_guard<std::mutex> lock(state->writerMutex);
+                    state->sampleQueue.push_back({ std::move(payload), false, true, 1024 });
+                }
+                state->writerCv.notify_one();
             }
 
             outBuffer->Unlock();
@@ -1229,6 +1240,7 @@ namespace
         {
             return false;
         }
+        StopWriterThread(state);
 
         if (state->codecPrivate.empty())
         {
@@ -1559,7 +1571,13 @@ namespace
 
     bool EncodeTexture(EncoderState* state, ID3D11Texture2D* texture)
     {
-        bool usesRegistered = false;
+        if (!state || !texture)
+        {
+            return false;
+        }
+
+        NV_ENC_REGISTERED_PTR registered = nullptr;
+        NV_ENC_BUFFER_FORMAT usedBufferFormat = state->bufferFormat;
         if (state->fastPreset != 0)
         {
             auto* converted = ConvertToNv12(state, texture);
@@ -1590,45 +1608,37 @@ namespace
                     }
                     state->registeredNv12 = registerRes.registeredResource;
                 }
-                usesRegistered = true;
+                registered = state->registeredNv12;
+                usedBufferFormat = state->bufferFormat;
             }
         }
 
-        NV_ENC_REGISTER_RESOURCE registerRes{};
-        if (!usesRegistered)
+        if (!registered)
         {
-            registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
-            registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-            registerRes.resourceToRegister = texture;
-            registerRes.width = state->width;
-            registerRes.height = state->height;
-            registerRes.bufferFormat = state->bufferFormat;
-            registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
-
-            auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
-            if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+            if (!EnsureRgbResource(state, texture))
             {
+                SetError(state, L"Failed to prepare RGB input resource.");
                 return false;
             }
+
+            state->deviceContext->CopyResource(state->rgbTexture, texture);
+            registered = state->registeredRgb;
+            usedBufferFormat = state->bufferFormat;
         }
 
         NV_ENC_MAP_INPUT_RESOURCE map{};
         map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
-        map.registeredResource = usesRegistered ? state->registeredNv12 : registerRes.registeredResource;
+        map.registeredResource = registered;
         auto status = state->funcs.nvEncMapInputResource(state->session, &map);
         if (!CheckStatus(state, status, L"nvEncMapInputResource failed"))
         {
-            if (!usesRegistered)
-            {
-                state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
-            }
             return false;
         }
 
         NV_ENC_PIC_PARAMS pic{};
         pic.version = NV_ENC_PIC_PARAMS_VER;
         pic.inputBuffer = map.mappedResource;
-        pic.bufferFmt = registerRes.bufferFormat;
+        pic.bufferFmt = usedBufferFormat;
         pic.inputWidth = state->width;
         pic.inputHeight = state->height;
         pic.outputBitstream = state->bitstream;
@@ -1638,10 +1648,6 @@ namespace
 
         status = state->funcs.nvEncEncodePicture(state->session, &pic);
         state->funcs.nvEncUnmapInputResource(state->session, map.mappedResource);
-        if (!usesRegistered)
-        {
-            state->funcs.nvEncUnregisterResource(state->session, registerRes.registeredResource);
-        }
         if (status == NV_ENC_ERR_NEED_MORE_INPUT)
         {
             return true;
@@ -1755,12 +1761,97 @@ namespace
         }
         {
             std::lock_guard<std::mutex> lock(state->writerMutex);
-            state->sampleQueue.push_back({ std::move(sampleData), isKeyframe });
+            state->sampleQueue.push_back({ std::move(sampleData), isKeyframe, false, 0 });
         }
         state->writerCv.notify_one();
 
         status = state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
         return CheckStatus(state, status, L"nvEncUnlockBitstream failed");
+    }
+
+    bool EnsureRgbResource(EncoderState* state, ID3D11Texture2D* texture)
+    {
+        if (!state || !state->device || !texture)
+        {
+            return false;
+        }
+
+        if (!state->deviceContext)
+        {
+            state->device->GetImmediateContext(&state->deviceContext);
+            if (!state->deviceContext)
+            {
+                return false;
+            }
+        }
+
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        texture->GetDesc(&srcDesc);
+
+        bool recreate = false;
+        if (!state->rgbTexture)
+        {
+            recreate = true;
+        }
+        else
+        {
+            D3D11_TEXTURE2D_DESC dstDesc{};
+            state->rgbTexture->GetDesc(&dstDesc);
+            if (dstDesc.Width != srcDesc.Width || dstDesc.Height != srcDesc.Height || dstDesc.Format != srcDesc.Format)
+            {
+                recreate = true;
+            }
+        }
+
+        if (recreate)
+        {
+            if (state->registeredRgb)
+            {
+                state->funcs.nvEncUnregisterResource(state->session, state->registeredRgb);
+                state->registeredRgb = nullptr;
+            }
+            if (state->rgbTexture)
+            {
+                state->rgbTexture->Release();
+                state->rgbTexture = nullptr;
+            }
+
+            D3D11_TEXTURE2D_DESC desc = srcDesc;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.SampleDesc.Count = 1;
+            desc.SampleDesc.Quality = 0;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            desc.CPUAccessFlags = 0;
+            desc.MiscFlags = 0;
+
+            if (FAILED(state->device->CreateTexture2D(&desc, nullptr, &state->rgbTexture)) || !state->rgbTexture)
+            {
+                return false;
+            }
+        }
+
+        if (!state->registeredRgb)
+        {
+            NV_ENC_REGISTER_RESOURCE registerRes{};
+            registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
+            registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+            registerRes.resourceToRegister = state->rgbTexture;
+            registerRes.width = state->width;
+            registerRes.height = state->height;
+            registerRes.bufferFormat = state->bufferFormat;
+            registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
+
+            auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
+            if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+            {
+                return false;
+            }
+            state->registeredRgb = registerRes.registeredResource;
+        }
+
+        return true;
     }
 
     bool EnsureVideoProcessor(EncoderState* state)
@@ -1907,11 +1998,21 @@ namespace
                     state->writerError = true;
                     break;
                 }
-                state->sampleOffsets.push_back(offset);
-                state->sampleSizes.push_back(static_cast<uint32_t>(sample.data.size()));
-                if (sample.keyframe)
+                if (sample.isAudio)
                 {
-                    state->syncSamples.push_back(static_cast<uint32_t>(state->sampleSizes.size()));
+                    state->audioSampleOffsets.push_back(offset);
+                    state->audioSampleSizes.push_back(static_cast<uint32_t>(sample.data.size()));
+                    state->audioSampleDurations.push_back(sample.audioDuration);
+                    state->audioSampleTotal += sample.audioDuration;
+                }
+                else
+                {
+                    state->sampleOffsets.push_back(offset);
+                    state->sampleSizes.push_back(static_cast<uint32_t>(sample.data.size()));
+                    if (sample.keyframe)
+                    {
+                        state->syncSamples.push_back(static_cast<uint32_t>(state->sampleSizes.size()));
+                    }
                 }
             }
         });
@@ -2038,8 +2139,6 @@ int NvencFinalize(void* handle)
         return 0;
     }
 
-    StopWriterThread(state);
-
     if (!FinalizeMp4(state))
     {
         return 0;
@@ -2056,10 +2155,13 @@ void NvencDestroy(void* handle)
         return;
     }
 
-    StopWriterThread(state);
-
     if (state->session)
     {
+        if (state->registeredRgb)
+        {
+            state->funcs.nvEncUnregisterResource(state->session, state->registeredRgb);
+            state->registeredRgb = nullptr;
+        }
         if (state->registeredNv12)
         {
             state->funcs.nvEncUnregisterResource(state->session, state->registeredNv12);
@@ -2108,6 +2210,11 @@ void NvencDestroy(void* handle)
         state->vpOutputView->Release();
         state->vpOutputView = nullptr;
     }
+    if (state->rgbTexture)
+    {
+        state->rgbTexture->Release();
+        state->rgbTexture = nullptr;
+    }
     if (state->nv12Texture)
     {
         state->nv12Texture->Release();
@@ -2133,11 +2240,18 @@ void NvencDestroy(void* handle)
         state->videoDevice->Release();
         state->videoDevice = nullptr;
     }
+    if (state->deviceContext)
+    {
+        state->deviceContext->Release();
+        state->deviceContext = nullptr;
+    }
     if (state->device)
     {
         state->device->Release();
         state->device = nullptr;
     }
+
+    StopWriterThread(state);
 
     delete state;
 }
