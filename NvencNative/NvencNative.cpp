@@ -1383,7 +1383,8 @@ namespace
         state->fps = fps;
         state->bufferFormat = bufferFormat;
 
-        state->nvencModule = LoadLibraryW(L"nvEncodeAPI64.dll");
+        // Load only from System32 to avoid DLL hijacking via current/plugin directories.
+        state->nvencModule = LoadLibraryExW(L"nvEncodeAPI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!state->nvencModule)
         {
             SetError(state, L"nvEncodeAPI64.dll not found. Check NVIDIA driver.");
