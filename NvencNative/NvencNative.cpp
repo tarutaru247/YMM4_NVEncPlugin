@@ -1565,29 +1565,33 @@ namespace
             auto* converted = ConvertToNv12(state, texture);
             if (!converted)
             {
-                SetError(state, L"Failed to convert input to NV12.");
-                return false;
+                // Fall back to RGB path when NV12 conversion is unavailable.
+                state->fastPreset = 0;
+                state->bufferFormat = state->originalBufferFormat;
             }
-            texture = converted;
-
-            if (!state->registeredNv12)
+            else
             {
-                NV_ENC_REGISTER_RESOURCE registerRes{};
-                registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
-                registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-                registerRes.resourceToRegister = texture;
-                registerRes.width = state->width;
-                registerRes.height = state->height;
-                registerRes.bufferFormat = state->bufferFormat;
-                registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
-                auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
-                if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+                texture = converted;
+
+                if (!state->registeredNv12)
                 {
-                    return false;
+                    NV_ENC_REGISTER_RESOURCE registerRes{};
+                    registerRes.version = NV_ENC_REGISTER_RESOURCE_VER;
+                    registerRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+                    registerRes.resourceToRegister = texture;
+                    registerRes.width = state->width;
+                    registerRes.height = state->height;
+                    registerRes.bufferFormat = state->bufferFormat;
+                    registerRes.bufferUsage = NV_ENC_INPUT_IMAGE;
+                    auto status = state->funcs.nvEncRegisterResource(state->session, &registerRes);
+                    if (!CheckStatus(state, status, L"nvEncRegisterResource failed"))
+                    {
+                        return false;
+                    }
+                    state->registeredNv12 = registerRes.registeredResource;
                 }
-                state->registeredNv12 = registerRes.registeredResource;
+                usesRegistered = true;
             }
-            usesRegistered = true;
         }
 
         NV_ENC_REGISTER_RESOURCE registerRes{};
