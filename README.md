@@ -19,3 +19,6 @@ YMM4向けのNVENC対応動画出力プラグインです。H.264 / H.265 のMP4
 
 ## ライセンス
 MIT License
+
+## 作者
+たるたる @tarutaru247
