@@ -39,3 +39,10 @@ bld/
 
 # Others
 YukkuriMovieMaker_v4_Lite/
+test_video/
+NVEncC_*/
+NVEncC_*.7z
+NVEncC64.exe
+*.lnk
+*.nv12
+無題*.txt

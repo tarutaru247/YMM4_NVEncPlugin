@@ -7,31 +7,15 @@ internal sealed class NvencConfigView : UserControl
 {
     private readonly ComboBox _codecComboBox;
     private readonly TextBox _bitrateTextBox;
-    private readonly TextBox _pathTextBox;
     private readonly NvencSettings _settings;
 
     public NvencConfigView(NvencSettings settings)
     {
         _settings = settings;
-
         var panel = new StackPanel
         {
             Margin = new Thickness(8),
         };
-
-        panel.Children.Add(new TextBlock
-        {
-            Text = "NVEncC パス（空なら PATH / プラグインと同じフォルダを探索）",
-            Margin = new Thickness(0, 0, 0, 4),
-        });
-
-        _pathTextBox = new TextBox
-        {
-            Text = _settings.NvencPath ?? string.Empty,
-            Margin = new Thickness(0, 0, 0, 12),
-        };
-        _pathTextBox.TextChanged += (_, _) => _settings.NvencPath = NormalizePath(_pathTextBox.Text);
-        panel.Children.Add(_pathTextBox);
 
         panel.Children.Add(new TextBlock
         {
@@ -78,14 +62,5 @@ internal sealed class NvencConfigView : UserControl
         });
 
         Content = panel;
-    }
-
-    private static string? NormalizePath(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return null;
-        }
-        return path.Trim();
     }
 }
