@@ -129,6 +129,7 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             bitrate,
             codec,
             quality,
+            _settings.FastPreset ? 1 : 0,
             rateControl,
             maxBitrate,
             bufferFormat,

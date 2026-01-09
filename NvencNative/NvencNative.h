@@ -14,6 +14,7 @@ extern "C" {
         int bitrateKbps,
         int codec,
         int quality,
+        int fastPreset,
         int rateControlMode,
         int maxBitrateKbps,
         int bufferFormat,
