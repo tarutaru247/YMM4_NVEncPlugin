@@ -94,7 +94,15 @@ internal sealed class NvencConfigView : UserControl
                 2 => NvencRateControl.YouTubeRecommended,
                 _ => NvencRateControl.Fixed,
             };
-            _bitrateTextBox.IsEnabled = _settings.RateControl != NvencRateControl.YouTubeRecommended;
+            if (_settings.RateControl == NvencRateControl.YouTubeRecommended)
+            {
+                _bitrateTextBox.IsEnabled = false;
+                return;
+            }
+
+            _bitrateTextBox.IsEnabled = true;
+            _settings.BitrateKbps = 12000;
+            _bitrateTextBox.Text = _settings.BitrateKbps.ToString();
         };
         _bitrateTextBox.TextChanged += (_, _) =>
         {

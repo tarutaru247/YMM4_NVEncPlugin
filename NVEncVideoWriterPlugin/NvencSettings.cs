@@ -3,10 +3,10 @@ namespace NVEncVideoWriterPlugin;
 internal sealed class NvencSettings
 {
     public NvencCodec Codec { get; set; } = NvencCodec.H264;
-    public int BitrateKbps { get; set; } = 8000;
+    public int BitrateKbps { get; set; } = 12000;
     public string? NvencPath { get; set; }
     public NvencQuality Quality { get; set; } = NvencQuality.Balanced;
-    public NvencRateControl RateControl { get; set; } = NvencRateControl.Fixed;
+    public NvencRateControl RateControl { get; set; } = NvencRateControl.YouTubeRecommended;
 }
 
 internal enum NvencCodec
