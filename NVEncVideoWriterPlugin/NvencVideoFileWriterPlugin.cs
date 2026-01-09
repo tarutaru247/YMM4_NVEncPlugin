@@ -30,6 +30,8 @@ public sealed class NvencVideoFileWriterPlugin : IVideoFileWriterPlugin
             Codec = _settings.Codec,
             BitrateKbps = _settings.BitrateKbps,
             NvencPath = _settings.NvencPath,
+            Quality = _settings.Quality,
+            RateControl = _settings.RateControl,
         };
         return new NvencVideoFileWriter(path, videoInfo, snapshot);
     }
