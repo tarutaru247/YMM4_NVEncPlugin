@@ -505,6 +505,8 @@ namespace
             return true;
         }
 
+        uint64_t dataEnd = state->file.Tell();
+
         auto moov = BuildMoov(state);
         if (!state->file.Write(moov.data(), moov.size()))
         {
@@ -513,7 +515,7 @@ namespace
         }
 
         uint64_t fileSize = state->file.Tell();
-        uint64_t mdatSize = fileSize - state->mdatHeaderOffset;
+        uint64_t mdatSize = dataEnd - state->mdatHeaderOffset;
         if (!state->file.Seek(state->mdatLargeSizeOffset) || !WriteU64BE(state->file, mdatSize))
         {
             SetError(state, L"Failed to update mdat size.");
