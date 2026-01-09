@@ -13,6 +13,7 @@ extern "C" {
         int fps,
         int bitrateKbps,
         int codec,
+        int quality,
         int bufferFormat,
         const wchar_t* outputPath);
 

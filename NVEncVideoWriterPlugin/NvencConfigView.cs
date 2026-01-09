@@ -7,6 +7,7 @@ internal sealed class NvencConfigView : UserControl
 {
     private readonly ComboBox _codecComboBox;
     private readonly TextBox _bitrateTextBox;
+    private readonly ComboBox _qualityComboBox;
     private readonly NvencSettings _settings;
 
     public NvencConfigView(NvencSettings settings)
@@ -34,6 +35,24 @@ internal sealed class NvencConfigView : UserControl
             _settings.Codec = _codecComboBox.SelectedIndex == 1 ? NvencCodec.H265 : NvencCodec.H264;
         };
         panel.Children.Add(_codecComboBox);
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = "出力品質",
+            Margin = new Thickness(0, 0, 0, 4),
+        });
+
+        _qualityComboBox = new ComboBox
+        {
+            Margin = new Thickness(0, 0, 0, 12),
+            ItemsSource = new[] { "高速", "標準", "高品質" },
+            SelectedIndex = (int)_settings.Quality,
+        };
+        _qualityComboBox.SelectionChanged += (_, _) =>
+        {
+            _settings.Quality = (NvencQuality)Math.Clamp(_qualityComboBox.SelectedIndex, 0, 2);
+        };
+        panel.Children.Add(_qualityComboBox);
 
         panel.Children.Add(new TextBlock
         {

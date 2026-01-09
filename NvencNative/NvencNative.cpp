@@ -1376,7 +1376,7 @@ namespace
     }
 
 
-    bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, NV_ENC_BUFFER_FORMAT bufferFormat)
+    bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, NV_ENC_BUFFER_FORMAT bufferFormat)
     {
         state->width = width;
         state->height = height;
@@ -1421,7 +1421,9 @@ namespace
         state->config.version = NV_ENC_CONFIG_VER;
 
         const GUID encodeGuid = (codec == 1) ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
-        const GUID presetGuid = NV_ENC_PRESET_P3_GUID;
+        const GUID presetGuid = (quality <= 0)
+            ? NV_ENC_PRESET_P1_GUID
+            : (quality == 2 ? NV_ENC_PRESET_P7_GUID : NV_ENC_PRESET_P3_GUID);
         const NV_ENC_TUNING_INFO tuningInfo = NV_ENC_TUNING_INFO_HIGH_QUALITY;
 
         NV_ENC_PRESET_CONFIG presetConfig{};
@@ -1645,7 +1647,7 @@ namespace
     }
 }
 
-void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int bufferFormat, const wchar_t* outputPath)
+void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int bufferFormat, const wchar_t* outputPath)
 {
     if (!device || !outputPath)
     {
@@ -1655,7 +1657,7 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
     auto* state = new EncoderState();
     state->outputPath = outputPath;
 
-    if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat)))
+    if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, quality, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat)))
     {
         return state;
     }

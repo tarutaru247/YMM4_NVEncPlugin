@@ -12,6 +12,7 @@ internal static class NvencNativeMethods
         int fps,
         int bitrateKbps,
         int codec,
+        int quality,
         int bufferFormat,
         string outputPath);
 
