@@ -198,15 +198,14 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
 
         var height = Math.Max(_videoInfo.Width, _videoInfo.Height);
         var highFps = _videoInfo.FPS >= 48;
-        int mbps = height switch
+        return height switch
         {
-            >= 2160 => highFps ? 60 : 40,
-            >= 1440 => highFps ? 24 : 16,
-            >= 1080 => highFps ? 12 : 8,
-            >= 720 => highFps ? 8 : 5,
-            _ => highFps ? 4 : 3,
+            >= 2160 => (highFps ? 60 : 40) * 1000,
+            >= 1440 => (highFps ? 24 : 16) * 1000,
+            >= 1080 => (highFps ? 12 : 8) * 1000,
+            >= 720 => highFps ? 7500 : 5000,
+            _ => (highFps ? 4 : 3) * 1000,
         };
-        return mbps * 1000;
     }
 
     private void EnsureNotDisposed()
