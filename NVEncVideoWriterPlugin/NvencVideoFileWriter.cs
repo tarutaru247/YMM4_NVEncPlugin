@@ -133,6 +133,7 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             rateControl,
             maxBitrate,
             bufferFormat,
+            _settings.HevcAsync ? 1 : 0,
             _outputPath);
 
         if (_encoderHandle == IntPtr.Zero)

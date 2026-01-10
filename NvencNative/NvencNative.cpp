@@ -1782,7 +1782,7 @@ namespace
     }
 
 
-    bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, NV_ENC_BUFFER_FORMAT bufferFormat)
+    bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, NV_ENC_BUFFER_FORMAT bufferFormat, int hevcAsync)
     {
         state->width = width;
         state->height = height;
@@ -1796,16 +1796,7 @@ namespace
             state->device->AddRef();
         }
 
-        bool hevcAsyncOptIn = false;
-        if (codec == 1)
-        {
-            wchar_t envValue[8]{};
-            DWORD envLen = GetEnvironmentVariableW(L"NVENC_HEVC_ASYNC", envValue, static_cast<DWORD>(std::size(envValue)));
-            if (envLen > 0 && (envValue[0] == L'1' || envValue[0] == L'y' || envValue[0] == L'Y'))
-            {
-                hevcAsyncOptIn = true;
-            }
-        }
+        const bool hevcAsyncOptIn = (codec == 1 && hevcAsync != 0);
 
         if (state->fastPreset != 0)
         {
@@ -2378,7 +2369,7 @@ namespace
     }
 }
 
-void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, int bufferFormat, const wchar_t* outputPath)
+void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, int bufferFormat, int hevcAsync, const wchar_t* outputPath)
 {
     if (!device || !outputPath)
     {
@@ -2390,7 +2381,7 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
     OpenLog(state);
     LogLine(state, L"create encoder");
 
-    if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, quality, fastPreset, rateControlMode, maxBitrateKbps, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat)))
+    if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, quality, fastPreset, rateControlMode, maxBitrateKbps, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat), hevcAsync))
     {
         return state;
     }

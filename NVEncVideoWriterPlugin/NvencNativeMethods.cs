@@ -17,6 +17,7 @@ internal static class NvencNativeMethods
         int rateControlMode,
         int maxBitrateKbps,
         int bufferFormat,
+        int hevcAsync,
         string outputPath);
 
     [DllImport("NvencNative.dll")]

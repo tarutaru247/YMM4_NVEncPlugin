@@ -9,6 +9,7 @@ internal sealed class NvencConfigView : UserControl
     private readonly ComboBox _rateControlComboBox;
     private readonly TextBox _bitrateTextBox;
     private readonly ComboBox _qualityComboBox;
+    private readonly CheckBox _hevcAsyncCheckBox;
     private readonly NvencSettings _settings;
 
     public NvencConfigView(NvencSettings settings)
@@ -31,11 +32,29 @@ internal sealed class NvencConfigView : UserControl
             ItemsSource = new[] { "H.264", "H.265 (HEVC)" },
             SelectedIndex = _settings.Codec == NvencCodec.H265 ? 1 : 0,
         };
+        panel.Children.Add(_codecComboBox);
+
+        _hevcAsyncCheckBox = new CheckBox
+        {
+            Content = "H.265 非同期エンコード（実験）",
+            IsChecked = _settings.HevcAsync,
+            IsEnabled = _settings.Codec == NvencCodec.H265,
+            Margin = new Thickness(0, 0, 0, 12),
+        };
+        _hevcAsyncCheckBox.Checked += (_, _) => _settings.HevcAsync = true;
+        _hevcAsyncCheckBox.Unchecked += (_, _) => _settings.HevcAsync = false;
+        panel.Children.Add(_hevcAsyncCheckBox);
+        
         _codecComboBox.SelectionChanged += (_, _) =>
         {
             _settings.Codec = _codecComboBox.SelectedIndex == 1 ? NvencCodec.H265 : NvencCodec.H264;
+            _hevcAsyncCheckBox.IsEnabled = _settings.Codec == NvencCodec.H265;
+            if (_settings.Codec != NvencCodec.H265)
+            {
+                _hevcAsyncCheckBox.IsChecked = false;
+                _settings.HevcAsync = false;
+            }
         };
-        panel.Children.Add(_codecComboBox);
 
         panel.Children.Add(new TextBlock
         {

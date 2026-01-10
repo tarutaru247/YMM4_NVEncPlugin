@@ -6,6 +6,7 @@ internal sealed class NvencSettings
     public int BitrateKbps { get; set; } = 12000;
     public NvencQuality Quality { get; set; } = NvencQuality.Balanced;
     public NvencRateControl RateControl { get; set; } = NvencRateControl.YouTubeRecommended;
+    public bool HevcAsync { get; set; }
 }
 
 internal enum NvencCodec
