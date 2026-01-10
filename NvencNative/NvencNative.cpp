@@ -201,6 +201,7 @@ namespace
         ID3D11Texture2D* rgbTexture = nullptr;
         NV_ENC_REGISTERED_PTR registeredRgb = nullptr;
         std::mutex fileMutex;
+        std::mutex logMutex;
         std::mutex writerMutex;
         std::condition_variable writerCv;
         std::thread writerThread;
@@ -247,6 +248,7 @@ namespace
         IMFTransform* aacEncoder = nullptr;
         std::wstring outputPath;
         std::wstring lastError;
+        HANDLE logFile = INVALID_HANDLE_VALUE;
     };
 
     std::vector<uint8_t> BuildAacSpecificConfig(int sampleRate, int channels);
@@ -255,6 +257,9 @@ namespace
     bool InitializeAsyncResources(EncoderState* state, uint32_t depth);
     void ReleaseAsyncResources(EncoderState* state);
     bool DrainAsyncBitstreams(EncoderState* state);
+    void OpenLog(EncoderState* state);
+    void CloseLog(EncoderState* state);
+    void LogLine(EncoderState* state, const std::wstring& line);
     bool ProcessAudioOutput(EncoderState* state);
     bool EncodeAudioFrame(EncoderState* state, const int16_t* pcm, uint32_t frameSamplesPerChannel);
     bool FlushAudio(EncoderState* state);
@@ -269,6 +274,7 @@ namespace
         if (state)
         {
             state->lastError = message;
+            LogLine(state, L"[error] " + message);
         }
     }
 
@@ -285,6 +291,72 @@ namespace
         error += L")";
         SetError(state, error);
         return false;
+    }
+
+    void OpenLog(EncoderState* state)
+    {
+        if (!state || state->logFile != INVALID_HANDLE_VALUE || state->outputPath.empty())
+        {
+            return;
+        }
+
+        std::wstring path = state->outputPath + L".nvenc_log.txt";
+        state->logFile = CreateFileW(
+            path.c_str(),
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+    }
+
+    void CloseLog(EncoderState* state)
+    {
+        if (!state || state->logFile == INVALID_HANDLE_VALUE)
+        {
+            return;
+        }
+        CloseHandle(state->logFile);
+        state->logFile = INVALID_HANDLE_VALUE;
+    }
+
+    void LogLine(EncoderState* state, const std::wstring& line)
+    {
+        if (!state)
+        {
+            return;
+        }
+        if (state->logFile == INVALID_HANDLE_VALUE)
+        {
+            OpenLog(state);
+        }
+        if (state->logFile == INVALID_HANDLE_VALUE)
+        {
+            return;
+        }
+
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        wchar_t prefix[64]{};
+        swprintf_s(prefix, L"%04u-%02u-%02u %02u:%02u:%02u.%03u [t%lu] ",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            GetCurrentThreadId());
+
+        std::wstring full = prefix + line + L"\r\n";
+        int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, full.c_str(), static_cast<int>(full.size()), nullptr, 0, nullptr, nullptr);
+        if (bytesNeeded <= 0)
+        {
+            return;
+        }
+
+        std::string utf8(bytesNeeded, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, full.c_str(), static_cast<int>(full.size()), &utf8[0], bytesNeeded, nullptr, nullptr);
+
+        std::lock_guard<std::mutex> lock(state->logMutex);
+        DWORD written = 0;
+        WriteFile(state->logFile, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
     }
 
     int ClampInt(int value, int minValue, int maxValue)
@@ -1247,6 +1319,7 @@ namespace
             return true;
         }
 
+        LogLine(state, L"finalize mp4 start");
         if (!FlushAudio(state))
         {
             return false;
@@ -1279,6 +1352,7 @@ namespace
         state->file.Seek(fileSize);
         state->file.Close();
         state->mp4Finalized = true;
+        LogLine(state, L"finalize mp4 done");
         return true;
     }
 
@@ -1544,6 +1618,7 @@ namespace
                 DWORD result = WaitForSingleObject(eventHandle, waitSliceMs);
                 if (result == WAIT_OBJECT_0)
                 {
+                    LogLine(state, L"async event signaled");
                     break;
                 }
                 if (result != WAIT_TIMEOUT)
@@ -1559,6 +1634,7 @@ namespace
                 auto tryStatus = state->funcs.nvEncLockBitstream(state->session, &tryLock);
                 if (tryStatus == NV_ENC_SUCCESS)
                 {
+                    LogLine(state, L"async bitstream ready (poll)");
                     bool ok = ProcessEncodedBitstream(state,
                         static_cast<uint8_t*>(tryLock.bitstreamBufferPtr),
                         tryLock.bitstreamSizeInBytes);
@@ -1663,6 +1739,7 @@ namespace
         state->asyncDepth = depth;
         state->asyncIndex = 0;
         state->asyncEnabled = true;
+        LogLine(state, L"async initialized");
         return true;
     }
 
@@ -1706,6 +1783,7 @@ namespace
             return true;
         }
 
+        LogLine(state, L"drain async bitstreams");
         for (size_t i = 0; i < state->asyncPending.size(); ++i)
         {
             if (state->asyncPending[i])
@@ -1974,6 +2052,7 @@ namespace
         state->funcs.nvEncUnmapInputResource(state->session, map.mappedResource);
         if (status == NV_ENC_ERR_NEED_MORE_INPUT)
         {
+            LogLine(state, L"encode needs more input");
             return true;
         }
         if (!CheckStatus(state, status, L"nvEncEncodePicture failed"))
@@ -2287,6 +2366,8 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
 
     auto* state = new EncoderState();
     state->outputPath = outputPath;
+    OpenLog(state);
+    LogLine(state, L"create encoder");
 
     if (!InitializeEncoder(state, device, width, height, fps, bitrateKbps, codec, quality, fastPreset, rateControlMode, maxBitrateKbps, static_cast<NV_ENC_BUFFER_FORMAT>(bufferFormat)))
     {
@@ -2299,6 +2380,7 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
         return state;
     }
 
+    LogLine(state, L"encoder initialized");
     return state;
 }
 
@@ -2399,6 +2481,7 @@ int NvencFinalize(void* handle)
         return 0;
     }
 
+    LogLine(state, L"encode EOS submitted");
     if (!DrainAsyncBitstreams(state))
     {
         return 0;
@@ -2420,6 +2503,7 @@ void NvencDestroy(void* handle)
         return;
     }
 
+    LogLine(state, L"destroy");
     if (state->session)
     {
         ReleaseAsyncResources(state);
@@ -2520,6 +2604,7 @@ void NvencDestroy(void* handle)
 
     StopWriterThread(state);
 
+    CloseLog(state);
     delete state;
 }
 
