@@ -1616,17 +1616,22 @@ namespace
             DWORD result = WaitForSingleObject(eventHandle, 5000);
             if (result == WAIT_OBJECT_0)
             {
-                LogLine(state, L"async event signaled");
+                LogLine(state, L"async event signaled slot=" + std::to_wstring(index));
             }
             else if (result != WAIT_TIMEOUT)
             {
                 SetError(state, L"nvEnc async wait failed.");
                 return false;
             }
+            else
+            {
+                LogLine(state, L"async wait timeout slot=" + std::to_wstring(index));
+            }
         }
 
         const DWORD maxWaitMs = 5000;
         DWORD waited = 0;
+        LogLine(state, L"async lock start slot=" + std::to_wstring(index));
         while (waited < maxWaitMs)
         {
             NV_ENC_LOCK_BITSTREAM lockBitstream{};
@@ -1636,7 +1641,7 @@ namespace
             auto status = state->funcs.nvEncLockBitstream(state->session, &lockBitstream);
             if (status == NV_ENC_SUCCESS)
             {
-                LogLine(state, L"async bitstream lock ok");
+                LogLine(state, L"async bitstream lock ok slot=" + std::to_wstring(index));
                 bool ok = ProcessEncodedBitstream(state,
                     static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr),
                     lockBitstream.bitstreamSizeInBytes);
@@ -1660,6 +1665,7 @@ namespace
             waited += 2;
         }
 
+        LogLine(state, L"async lock timeout slot=" + std::to_wstring(index));
         SetError(state, L"nvEnc async timeout.");
         return false;
     }
@@ -1764,10 +1770,12 @@ namespace
         {
             if (state->asyncPending[i])
             {
+                LogLine(state, L"drain slot start=" + std::to_wstring(i));
                 if (!ConsumeAsyncBitstream(state, i))
                 {
                     return false;
                 }
+                LogLine(state, L"drain slot done=" + std::to_wstring(i));
             }
         }
         return true;
