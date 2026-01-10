@@ -1610,82 +1610,55 @@ namespace
         HANDLE eventHandle = state->asyncEvents[index];
         if (eventHandle)
         {
-            const DWORD waitSliceMs = 200;
-            const DWORD maxWaitMs = 5000;
-            DWORD waited = 0;
-            while (waited < maxWaitMs)
+            DWORD result = WaitForSingleObject(eventHandle, 5000);
+            if (result == WAIT_OBJECT_0)
             {
-                DWORD result = WaitForSingleObject(eventHandle, waitSliceMs);
-                if (result == WAIT_OBJECT_0)
-                {
-                    LogLine(state, L"async event signaled");
-                    break;
-                }
-                if (result != WAIT_TIMEOUT)
-                {
-                    SetError(state, L"nvEnc async wait failed.");
-                    return false;
-                }
-
-                NV_ENC_LOCK_BITSTREAM tryLock{};
-                tryLock.version = NV_ENC_LOCK_BITSTREAM_VER;
-                tryLock.outputBitstream = state->asyncBitstreams[index];
-                tryLock.doNotWait = 1;
-                auto tryStatus = state->funcs.nvEncLockBitstream(state->session, &tryLock);
-                if (tryStatus == NV_ENC_SUCCESS)
-                {
-                    LogLine(state, L"async bitstream ready (poll)");
-                    bool ok = ProcessEncodedBitstream(state,
-                        static_cast<uint8_t*>(tryLock.bitstreamBufferPtr),
-                        tryLock.bitstreamSizeInBytes);
-
-                    auto unlockStatus = state->funcs.nvEncUnlockBitstream(state->session, state->asyncBitstreams[index]);
-                    if (!CheckStatus(state, unlockStatus, L"nvEncUnlockBitstream failed"))
-                    {
-                        return false;
-                    }
-
-                    state->asyncPending[index] = false;
-                    return ok;
-                }
-                if (tryStatus != NV_ENC_ERR_LOCK_BUSY)
-                {
-                    CheckStatus(state, tryStatus, L"nvEncLockBitstream failed");
-                    return false;
-                }
-
-                waited += waitSliceMs;
+                LogLine(state, L"async event signaled");
             }
-
-            if (waited >= maxWaitMs)
+            else if (result != WAIT_TIMEOUT)
             {
-                SetError(state, L"nvEnc async timeout.");
+                SetError(state, L"nvEnc async wait failed.");
                 return false;
             }
         }
 
-        NV_ENC_LOCK_BITSTREAM lockBitstream{};
-        lockBitstream.version = NV_ENC_LOCK_BITSTREAM_VER;
-        lockBitstream.outputBitstream = state->asyncBitstreams[index];
-        lockBitstream.doNotWait = 0;
-        auto status = state->funcs.nvEncLockBitstream(state->session, &lockBitstream);
-        if (!CheckStatus(state, status, L"nvEncLockBitstream failed"))
+        const DWORD maxWaitMs = 5000;
+        DWORD waited = 0;
+        while (waited < maxWaitMs)
         {
-            return false;
+            NV_ENC_LOCK_BITSTREAM lockBitstream{};
+            lockBitstream.version = NV_ENC_LOCK_BITSTREAM_VER;
+            lockBitstream.outputBitstream = state->asyncBitstreams[index];
+            lockBitstream.doNotWait = 1;
+            auto status = state->funcs.nvEncLockBitstream(state->session, &lockBitstream);
+            if (status == NV_ENC_SUCCESS)
+            {
+                LogLine(state, L"async bitstream lock ok");
+                bool ok = ProcessEncodedBitstream(state,
+                    static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr),
+                    lockBitstream.bitstreamSizeInBytes);
+
+                auto unlockStatus = state->funcs.nvEncUnlockBitstream(state->session, state->asyncBitstreams[index]);
+                if (!CheckStatus(state, unlockStatus, L"nvEncUnlockBitstream failed"))
+                {
+                    return false;
+                }
+
+                state->asyncPending[index] = false;
+                return ok;
+            }
+            if (status != NV_ENC_ERR_LOCK_BUSY)
+            {
+                CheckStatus(state, status, L"nvEncLockBitstream failed");
+                return false;
+            }
+
+            Sleep(2);
+            waited += 2;
         }
 
-        bool ok = ProcessEncodedBitstream(state,
-            static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr),
-            lockBitstream.bitstreamSizeInBytes);
-
-        status = state->funcs.nvEncUnlockBitstream(state->session, state->asyncBitstreams[index]);
-        if (!CheckStatus(state, status, L"nvEncUnlockBitstream failed"))
-        {
-            return false;
-        }
-
-        state->asyncPending[index] = false;
-        return ok;
+        SetError(state, L"nvEnc async timeout.");
+        return false;
     }
 
     bool InitializeAsyncResources(EncoderState* state, uint32_t depth)
