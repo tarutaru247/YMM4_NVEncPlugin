@@ -19,6 +19,7 @@ extern "C" {
         int maxBitrateKbps,
         int bufferFormat,
         int hevcAsync,
+        int enableDebugLog,
         const wchar_t* outputPath);
 
     __declspec(dllexport) int NvencEncode(void* handle, ID3D11Texture2D* texture);

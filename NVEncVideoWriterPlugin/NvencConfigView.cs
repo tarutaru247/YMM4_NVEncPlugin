@@ -10,6 +10,7 @@ internal sealed class NvencConfigView : UserControl
     private readonly TextBox _bitrateTextBox;
     private readonly ComboBox _qualityComboBox;
     private readonly CheckBox _hevcAsyncCheckBox;
+    private readonly CheckBox _debugLogCheckBox;
     private readonly NvencSettings _settings;
 
     public NvencConfigView(NvencSettings settings)
@@ -36,13 +37,13 @@ internal sealed class NvencConfigView : UserControl
 
         _hevcAsyncCheckBox = new CheckBox
         {
-            Content = "H.265 非同期エンコード（実験）",
-            IsChecked = _settings.HevcAsync,
+            Content = "H.265 安定性重視（遅い）",
+            IsChecked = !_settings.HevcAsync,
             IsEnabled = _settings.Codec == NvencCodec.H265,
             Margin = new Thickness(0, 0, 0, 12),
         };
-        _hevcAsyncCheckBox.Checked += (_, _) => _settings.HevcAsync = true;
-        _hevcAsyncCheckBox.Unchecked += (_, _) => _settings.HevcAsync = false;
+        _hevcAsyncCheckBox.Checked += (_, _) => _settings.HevcAsync = false;
+        _hevcAsyncCheckBox.Unchecked += (_, _) => _settings.HevcAsync = true;
         panel.Children.Add(_hevcAsyncCheckBox);
         
         _codecComboBox.SelectionChanged += (_, _) =>
@@ -51,10 +52,23 @@ internal sealed class NvencConfigView : UserControl
             _hevcAsyncCheckBox.IsEnabled = _settings.Codec == NvencCodec.H265;
             if (_settings.Codec != NvencCodec.H265)
             {
-                _hevcAsyncCheckBox.IsChecked = false;
                 _settings.HevcAsync = false;
+                _hevcAsyncCheckBox.IsChecked = false;
+                return;
             }
+
+            _settings.HevcAsync = !_hevcAsyncCheckBox.IsChecked.GetValueOrDefault(false);
         };
+
+        _debugLogCheckBox = new CheckBox
+        {
+            Content = "デバッグログを書き出す",
+            IsChecked = _settings.EnableDebugLog,
+            Margin = new Thickness(0, 0, 0, 12),
+        };
+        _debugLogCheckBox.Checked += (_, _) => _settings.EnableDebugLog = true;
+        _debugLogCheckBox.Unchecked += (_, _) => _settings.EnableDebugLog = false;
+        panel.Children.Add(_debugLogCheckBox);
 
         panel.Children.Add(new TextBlock
         {

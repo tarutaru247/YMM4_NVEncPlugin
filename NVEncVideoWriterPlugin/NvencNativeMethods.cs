@@ -18,6 +18,7 @@ internal static class NvencNativeMethods
         int maxBitrateKbps,
         int bufferFormat,
         int hevcAsync,
+        int enableDebugLog,
         string outputPath);
 
     [DllImport("NvencNative.dll")]

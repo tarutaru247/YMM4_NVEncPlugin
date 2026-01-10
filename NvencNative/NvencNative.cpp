@@ -248,6 +248,7 @@ namespace
         IMFTransform* aacEncoder = nullptr;
         std::wstring outputPath;
         std::wstring lastError;
+        bool logEnabled = false;
         HANDLE logFile = INVALID_HANDLE_VALUE;
     };
 
@@ -295,7 +296,7 @@ namespace
 
     void OpenLog(EncoderState* state)
     {
-        if (!state || state->logFile != INVALID_HANDLE_VALUE || state->outputPath.empty())
+        if (!state || !state->logEnabled || state->logFile != INVALID_HANDLE_VALUE || state->outputPath.empty())
         {
             return;
         }
@@ -323,7 +324,7 @@ namespace
 
     void LogLine(EncoderState* state, const std::wstring& line)
     {
-        if (!state)
+        if (!state || !state->logEnabled)
         {
             return;
         }
@@ -2369,7 +2370,7 @@ namespace
     }
 }
 
-void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, int bufferFormat, int hevcAsync, const wchar_t* outputPath)
+void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, int bufferFormat, int hevcAsync, int enableDebugLog, const wchar_t* outputPath)
 {
     if (!device || !outputPath)
     {
@@ -2378,6 +2379,7 @@ void* NvencCreate(ID3D11Device* device, int width, int height, int fps, int bitr
 
     auto* state = new EncoderState();
     state->outputPath = outputPath;
+    state->logEnabled = enableDebugLog != 0;
     OpenLog(state);
     LogLine(state, L"create encoder");
 
