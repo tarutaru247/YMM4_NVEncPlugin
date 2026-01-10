@@ -649,6 +649,7 @@ namespace
             if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT)
             {
                 outSample->Release();
+                LogLine(state, L"audio output need more input");
                 break;
             }
             if (FAILED(hr))
@@ -795,6 +796,7 @@ namespace
             return true;
         }
 
+        LogLine(state, L"flush audio start");
         const uint32_t frameSamples = 1024;
         const uint32_t channels = static_cast<uint32_t>(state->audioChannels);
         const uint32_t frameCount = frameSamples * channels;
@@ -818,6 +820,7 @@ namespace
             return false;
         }
 
+        LogLine(state, L"flush audio done");
         return true;
     }
 
@@ -2256,6 +2259,7 @@ namespace
         {
             return;
         }
+        LogLine(state, L"writer thread start");
         state->writerStop = false;
         state->writerError = false;
         state->writerStarted = true;
@@ -2308,6 +2312,7 @@ namespace
                     }
                 }
             }
+            LogLine(state, L"writer thread exit");
         });
     }
 
@@ -2317,6 +2322,7 @@ namespace
         {
             return;
         }
+        LogLine(state, L"writer thread stop request");
         {
             std::lock_guard<std::mutex> lock(state->writerMutex);
             state->writerStop = true;
@@ -2327,6 +2333,7 @@ namespace
             state->writerThread.join();
         }
         state->writerStarted = false;
+        LogLine(state, L"writer thread stopped");
     }
 }
 
