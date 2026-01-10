@@ -1796,6 +1796,17 @@ namespace
             state->device->AddRef();
         }
 
+        bool hevcAsyncOptIn = false;
+        if (codec == 1)
+        {
+            wchar_t envValue[8]{};
+            DWORD envLen = GetEnvironmentVariableW(L"NVENC_HEVC_ASYNC", envValue, static_cast<DWORD>(std::size(envValue)));
+            if (envLen > 0 && (envValue[0] == L'1' || envValue[0] == L'y' || envValue[0] == L'Y'))
+            {
+                hevcAsyncOptIn = true;
+            }
+        }
+
         if (state->fastPreset != 0)
         {
             if (EnsureVideoProcessor(state))
@@ -1880,7 +1891,7 @@ namespace
         state->initParams.enablePTD = 1;
         state->initParams.reportSliceOffsets = 0;
         state->initParams.enableSubFrameWrite = 0;
-        const bool allowAsync = (codec == 0);
+        const bool allowAsync = (codec == 0) || (codec == 1 && hevcAsyncOptIn);
         state->initParams.enableEncodeAsync = allowAsync ? 1 : 0;
         state->initParams.encodeConfig = &state->config;
 
@@ -1925,6 +1936,10 @@ namespace
         {
             state->initParams.enableEncodeAsync = 0;
             state->asyncEnabled = false;
+            if (codec == 1)
+            {
+                LogLine(state, L"HEVC async disabled (sync mode)");
+            }
             NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
             createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
             status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
@@ -1938,6 +1953,10 @@ namespace
         {
             state->initParams.enableEncodeAsync = 0;
             state->asyncEnabled = false;
+            if (codec == 1)
+            {
+                LogLine(state, L"HEVC async failed, fallback to sync");
+            }
             NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
             createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
             status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
