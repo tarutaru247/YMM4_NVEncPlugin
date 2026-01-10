@@ -1921,7 +1921,20 @@ namespace
             return false;
         }
 
-        if (allowAsync && !InitializeAsyncResources(state, 4))
+        if (!allowAsync)
+        {
+            state->initParams.enableEncodeAsync = 0;
+            state->asyncEnabled = false;
+            NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
+            createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+            status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
+            if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
+            {
+                return false;
+            }
+            state->bitstream = createBitstream.bitstreamBuffer;
+        }
+        else if (!InitializeAsyncResources(state, 4))
         {
             state->initParams.enableEncodeAsync = 0;
             state->asyncEnabled = false;
