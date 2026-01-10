@@ -2467,36 +2467,66 @@ int NvencFinalize(void* handle)
     NV_ENC_PIC_PARAMS pic{};
     pic.version = NV_ENC_PIC_PARAMS_VER;
     pic.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
-    if (state->asyncEnabled && !state->asyncBitstreams.empty())
+    if (state->asyncEnabled)
     {
-        size_t asyncSlot = state->asyncIndex % state->asyncBitstreams.size();
-        if (state->asyncPending[asyncSlot])
+        if (!state->bitstream)
         {
-            if (!ConsumeAsyncBitstream(state, asyncSlot))
+            NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
+            createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+            auto status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
+            if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
             {
                 return 0;
             }
+            state->bitstream = createBitstream.bitstreamBuffer;
         }
-        pic.outputBitstream = state->asyncBitstreams[asyncSlot];
-        pic.completionEvent = state->asyncEvents[asyncSlot];
-        state->asyncPending[asyncSlot] = true;
-        state->asyncIndex = (asyncSlot + 1) % state->asyncBitstreams.size();
+        pic.outputBitstream = state->bitstream;
+        auto status = state->funcs.nvEncEncodePicture(state->session, &pic);
+        if (status != NV_ENC_SUCCESS)
+        {
+            SetError(state, L"nvEncEncodePicture (EOS) failed");
+            return 0;
+        }
+
+        NV_ENC_LOCK_BITSTREAM lockBitstream{};
+        lockBitstream.version = NV_ENC_LOCK_BITSTREAM_VER;
+        lockBitstream.outputBitstream = state->bitstream;
+        status = state->funcs.nvEncLockBitstream(state->session, &lockBitstream);
+        if (!CheckStatus(state, status, L"nvEncLockBitstream failed"))
+        {
+            return 0;
+        }
+
+        bool ok = ProcessEncodedBitstream(state,
+            static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr),
+            lockBitstream.bitstreamSizeInBytes);
+
+        status = state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
+        if (!CheckStatus(state, status, L"nvEncUnlockBitstream failed"))
+        {
+            return 0;
+        }
+        if (!ok)
+        {
+            return 0;
+        }
+
+        LogLine(state, L"encode EOS submitted (sync)");
+        if (!DrainAsyncBitstreams(state))
+        {
+            return 0;
+        }
     }
     else
     {
         pic.outputBitstream = state->bitstream;
-    }
-    auto status = state->funcs.nvEncEncodePicture(state->session, &pic);
-    if (status != NV_ENC_SUCCESS)
-    {
-        SetError(state, L"nvEncEncodePicture (EOS) failed");
-        return 0;
-    }
-
-    LogLine(state, L"encode EOS submitted");
-    if (!DrainAsyncBitstreams(state))
-    {
-        return 0;
+        auto status = state->funcs.nvEncEncodePicture(state->session, &pic);
+        if (status != NV_ENC_SUCCESS)
+        {
+            SetError(state, L"nvEncEncodePicture (EOS) failed");
+            return 0;
+        }
+        LogLine(state, L"encode EOS submitted");
     }
 
     if (!FinalizeMp4(state))
