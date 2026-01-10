@@ -15,6 +15,7 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
     private readonly NvencSettings _settings;
     private IntPtr _encoderHandle = IntPtr.Zero;
     private bool _disposed;
+    private readonly object _encodeLock = new();
 
     public NvencVideoFileWriter(string outputPath, VideoInfo videoInfo, NvencSettings settings)
     {
@@ -35,13 +36,16 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             return;
         }
 
-        if (_encoderHandle == IntPtr.Zero)
+        lock (_encodeLock)
         {
-            _pendingAudio.AddRange(samples);
-            return;
-        }
+            if (_encoderHandle == IntPtr.Zero)
+            {
+                _pendingAudio.AddRange(samples);
+                return;
+            }
 
-        WriteAudioInternal(samples);
+            WriteAudioInternal(samples);
+        }
     }
 
     public void WriteVideo(byte[] frame)
@@ -65,15 +69,18 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
             throw new InvalidOperationException("D3D11 テクスチャを取得できませんでした。");
         }
 
-        if (_encoderHandle == IntPtr.Zero)
+        lock (_encodeLock)
         {
-            InitializeEncoder(texture);
-        }
+            if (_encoderHandle == IntPtr.Zero)
+            {
+                InitializeEncoder(texture);
+            }
 
-        var result = NvencNativeMethods.NvencEncode(_encoderHandle, texture.NativePointer);
-        if (result == 0)
-        {
-            throw new InvalidOperationException(GetNativeError());
+            var result = NvencNativeMethods.NvencEncode(_encoderHandle, texture.NativePointer);
+            if (result == 0)
+            {
+                throw new InvalidOperationException(GetNativeError());
+            }
         }
     }
 
@@ -86,11 +93,14 @@ internal sealed class NvencVideoFileWriter : IVideoFileWriter2, IDisposable
 
         _disposed = true;
 
-        if (_encoderHandle != IntPtr.Zero)
+        lock (_encodeLock)
         {
-            NvencNativeMethods.NvencFinalize(_encoderHandle);
-            NvencNativeMethods.NvencDestroy(_encoderHandle);
-            _encoderHandle = IntPtr.Zero;
+            if (_encoderHandle != IntPtr.Zero)
+            {
+                NvencNativeMethods.NvencFinalize(_encoderHandle);
+                NvencNativeMethods.NvencDestroy(_encoderHandle);
+                _encoderHandle = IntPtr.Zero;
+            }
         }
     }
 
