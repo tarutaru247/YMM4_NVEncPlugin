@@ -1880,7 +1880,8 @@ namespace
         state->initParams.enablePTD = 1;
         state->initParams.reportSliceOffsets = 0;
         state->initParams.enableSubFrameWrite = 0;
-        state->initParams.enableEncodeAsync = 1;
+        const bool allowAsync = (codec == 0);
+        state->initParams.enableEncodeAsync = allowAsync ? 1 : 0;
         state->initParams.encodeConfig = &state->config;
 
         state->config.rcParams.rateControlMode = (rateControlMode == 1) ? NV_ENC_PARAMS_RC_VBR : NV_ENC_PARAMS_RC_CBR;
@@ -1920,7 +1921,7 @@ namespace
             return false;
         }
 
-        if (!InitializeAsyncResources(state, 4))
+        if (allowAsync && !InitializeAsyncResources(state, 4))
         {
             state->initParams.enableEncodeAsync = 0;
             state->asyncEnabled = false;
