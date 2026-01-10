@@ -1,10 +1,19 @@
 # NVENC プラグイン出力
 
-YMM4(ゆっくりMovieMaker4)での動画書き出しを高速化するためのプラグインです。
+YMM4(ゆっくりMovieMaker4)での動画書き出しを高速化するためのプラグインです。  
 NVENCのパイプライン化により非同期でのエンコードを行い、GPUを効率的に使えるようにしています。
 
+## エンコード高速化
+品質を損なわずにエンコードを高速化します。  
+私の環境(RTX5070Ti/FullHD60fps)でエンコード速度を約2倍にすることに成功しています。  
+
+``` 
+他の環境でのテストが行えていません。エンコード速度の変化や発生したバグなどを報告していただけると大変助かります。  
+報告の際はPC環境(特にGPU)とデバッグログを教えてください。
+```
+
 ## インストール
-1. [リリースページ](https://github.com/tarutaru247/YMM4_NVEncPlugin/releases/new)もしくは[Booth](https://tarutaru247.booth.pm/)から、NVEncPlugin.ymmeをダウンロード
+1. [リリースページ](https://github.com/tarutaru247/YMM4_NVEncPlugin/releases)もしくは[Booth](https://tarutaru247.booth.pm/)から、NVEncPlugin.ymmeをダウンロード
 2. ダウンロードしたファイルを開くと、自動的にYMM4のプラグインインストーラーが起動します
 3. インストーラーの指示に従いインストール
 
@@ -19,7 +28,7 @@ NVENCのパイプライン化により非同期でのエンコードを行い、
 - Windows 11
 - NVIDIA GPU と最新ドライバ
 
-```AMD GPUやIntel GPUでは動作しません```
+AMD GPUやIntel GPUでは動作しません
 
 ## 音声
 - AAC固定（Media FoundationのAACエンコーダを使用）
@@ -42,4 +51,4 @@ MIT License
 - YukkuriMovieMaker v4 本体は同梱しません（本体の配布・利用は YMM4 の規約に従ってください）
 
 ## 作者
-たるたる @tarutaru247
+たるたる [@tarutaru247](https://x.com/tarutaru247)
