@@ -180,6 +180,12 @@ namespace
         NV_ENC_INITIALIZE_PARAMS initParams{};
         NV_ENC_CONFIG config{};
         NV_ENC_OUTPUT_PTR bitstream = nullptr;
+        std::vector<NV_ENC_OUTPUT_PTR> asyncBitstreams;
+        std::vector<HANDLE> asyncEvents;
+        std::vector<bool> asyncPending;
+        uint32_t asyncDepth = 0;
+        size_t asyncIndex = 0;
+        bool asyncEnabled = false;
         NV_ENC_BUFFER_FORMAT bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
         NV_ENC_BUFFER_FORMAT originalBufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
         int fastPreset = 0;
@@ -244,6 +250,11 @@ namespace
     };
 
     std::vector<uint8_t> BuildAacSpecificConfig(int sampleRate, int channels);
+    bool ProcessEncodedBitstream(EncoderState* state, const uint8_t* data, size_t size);
+    bool ConsumeAsyncBitstream(EncoderState* state, size_t index);
+    bool InitializeAsyncResources(EncoderState* state, uint32_t depth);
+    void ReleaseAsyncResources(EncoderState* state);
+    bool DrainAsyncBitstreams(EncoderState* state);
     bool ProcessAudioOutput(EncoderState* state);
     bool EncodeAudioFrame(EncoderState* state, const int16_t* pcm, uint32_t frameSamplesPerChannel);
     bool FlushAudio(EncoderState* state);
@@ -1419,6 +1430,246 @@ namespace
         return output;
     }
 
+    bool ProcessEncodedBitstream(EncoderState* state, const uint8_t* data, size_t size)
+    {
+        if (!state || !data || size == 0)
+        {
+            return true;
+        }
+
+        std::vector<uint8_t> buffer(data, data + size);
+        bool hevc = (state->initParams.encodeGUID == NV_ENC_CODEC_HEVC_GUID);
+        auto units = ParseAnnexB(buffer.data(), buffer.size(), hevc);
+
+        std::vector<uint8_t> sps;
+        std::vector<uint8_t> pps;
+        std::vector<uint8_t> vps;
+        bool isKeyframe = false;
+        for (const auto& unit : units)
+        {
+            if (!hevc)
+            {
+                if (unit.type == 7 && sps.empty())
+                {
+                    sps.assign(unit.data, unit.data + unit.size);
+                }
+                else if (unit.type == 8 && pps.empty())
+                {
+                    pps.assign(unit.data, unit.data + unit.size);
+                }
+                else if (unit.type == 5)
+                {
+                    isKeyframe = true;
+                }
+            }
+            else
+            {
+                if (unit.type == 32 && vps.empty())
+                {
+                    vps.assign(unit.data, unit.data + unit.size);
+                }
+                else if (unit.type == 33 && sps.empty())
+                {
+                    sps.assign(unit.data, unit.data + unit.size);
+                }
+                else if (unit.type == 34 && pps.empty())
+                {
+                    pps.assign(unit.data, unit.data + unit.size);
+                }
+                else if (unit.type == 19 || unit.type == 20)
+                {
+                    isKeyframe = true;
+                }
+            }
+        }
+
+        if (!state->writerInitialized)
+        {
+            std::vector<uint8_t> codecPrivate = hevc ? BuildHvcC(vps, sps, pps) : BuildAvcC(sps, pps);
+            if (codecPrivate.empty())
+            {
+                return true;
+            }
+            if (!InitializeMp4Writer(state, hevc, codecPrivate))
+            {
+                return false;
+            }
+        }
+        else if (state->codecPrivate.empty())
+        {
+            std::vector<uint8_t> codecPrivate = hevc ? BuildHvcC(vps, sps, pps) : BuildAvcC(sps, pps);
+            if (!codecPrivate.empty())
+            {
+                state->codecPrivate = codecPrivate;
+            }
+        }
+
+        auto sampleData = ConvertToLengthPrefixed(units, false);
+        if (sampleData.empty())
+        {
+            return true;
+        }
+
+        if (!state->writerStarted)
+        {
+            StartWriterThread(state);
+        }
+        if (state->writerError)
+        {
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(state->writerMutex);
+            state->sampleQueue.push_back({ std::move(sampleData), isKeyframe, false, 0 });
+        }
+        state->writerCv.notify_one();
+        return true;
+    }
+
+    bool ConsumeAsyncBitstream(EncoderState* state, size_t index)
+    {
+        if (!state || !state->asyncEnabled || index >= state->asyncBitstreams.size())
+        {
+            return false;
+        }
+
+        HANDLE eventHandle = state->asyncEvents[index];
+        if (eventHandle)
+        {
+            WaitForSingleObject(eventHandle, INFINITE);
+        }
+
+        NV_ENC_LOCK_BITSTREAM lockBitstream{};
+        lockBitstream.version = NV_ENC_LOCK_BITSTREAM_VER;
+        lockBitstream.outputBitstream = state->asyncBitstreams[index];
+        lockBitstream.doNotWait = 0;
+        auto status = state->funcs.nvEncLockBitstream(state->session, &lockBitstream);
+        if (!CheckStatus(state, status, L"nvEncLockBitstream failed"))
+        {
+            return false;
+        }
+
+        bool ok = ProcessEncodedBitstream(state,
+            static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr),
+            lockBitstream.bitstreamSizeInBytes);
+
+        status = state->funcs.nvEncUnlockBitstream(state->session, state->asyncBitstreams[index]);
+        if (!CheckStatus(state, status, L"nvEncUnlockBitstream failed"))
+        {
+            return false;
+        }
+
+        state->asyncPending[index] = false;
+        return ok;
+    }
+
+    bool InitializeAsyncResources(EncoderState* state, uint32_t depth)
+    {
+        if (!state || !state->session || depth < 2)
+        {
+            return false;
+        }
+
+        state->asyncBitstreams.clear();
+        state->asyncEvents.clear();
+        state->asyncPending.clear();
+        state->asyncBitstreams.resize(depth, nullptr);
+        state->asyncEvents.resize(depth, nullptr);
+        state->asyncPending.resize(depth, false);
+
+        for (uint32_t i = 0; i < depth; ++i)
+        {
+            NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
+            createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+            auto status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
+            if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
+            {
+                ReleaseAsyncResources(state);
+                return false;
+            }
+            state->asyncBitstreams[i] = createBitstream.bitstreamBuffer;
+
+            HANDLE evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!evt)
+            {
+                SetError(state, L"Failed to create async event.");
+                ReleaseAsyncResources(state);
+                return false;
+            }
+
+            NV_ENC_EVENT_PARAMS eventParams{};
+            eventParams.version = NV_ENC_EVENT_PARAMS_VER;
+            eventParams.completionEvent = evt;
+            status = state->funcs.nvEncRegisterAsyncEvent(state->session, &eventParams);
+            if (!CheckStatus(state, status, L"nvEncRegisterAsyncEvent failed"))
+            {
+                CloseHandle(evt);
+                ReleaseAsyncResources(state);
+                return false;
+            }
+
+            state->asyncEvents[i] = evt;
+        }
+
+        state->asyncDepth = depth;
+        state->asyncIndex = 0;
+        state->asyncEnabled = true;
+        return true;
+    }
+
+    void ReleaseAsyncResources(EncoderState* state)
+    {
+        if (!state)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < state->asyncBitstreams.size(); ++i)
+        {
+            if (state->asyncBitstreams[i])
+            {
+                state->funcs.nvEncDestroyBitstreamBuffer(state->session, state->asyncBitstreams[i]);
+                state->asyncBitstreams[i] = nullptr;
+            }
+            if (state->asyncEvents[i])
+            {
+                NV_ENC_EVENT_PARAMS eventParams{};
+                eventParams.version = NV_ENC_EVENT_PARAMS_VER;
+                eventParams.completionEvent = state->asyncEvents[i];
+                state->funcs.nvEncUnregisterAsyncEvent(state->session, &eventParams);
+                CloseHandle(state->asyncEvents[i]);
+                state->asyncEvents[i] = nullptr;
+            }
+        }
+
+        state->asyncBitstreams.clear();
+        state->asyncEvents.clear();
+        state->asyncPending.clear();
+        state->asyncDepth = 0;
+        state->asyncIndex = 0;
+        state->asyncEnabled = false;
+    }
+
+    bool DrainAsyncBitstreams(EncoderState* state)
+    {
+        if (!state || !state->asyncEnabled)
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < state->asyncPending.size(); ++i)
+        {
+            if (state->asyncPending[i])
+            {
+                if (!ConsumeAsyncBitstream(state, i))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
 
     bool InitializeEncoder(EncoderState* state, ID3D11Device* device, int width, int height, int fps, int bitrateKbps, int codec, int quality, int fastPreset, int rateControlMode, int maxBitrateKbps, NV_ENC_BUFFER_FORMAT bufferFormat)
     {
@@ -1518,6 +1769,7 @@ namespace
         state->initParams.enablePTD = 1;
         state->initParams.reportSliceOffsets = 0;
         state->initParams.enableSubFrameWrite = 0;
+        state->initParams.enableEncodeAsync = 1;
         state->initParams.encodeConfig = &state->config;
 
         state->config.rcParams.rateControlMode = (rateControlMode == 1) ? NV_ENC_PARAMS_RC_VBR : NV_ENC_PARAMS_RC_CBR;
@@ -1557,14 +1809,19 @@ namespace
             return false;
         }
 
-        NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
-        createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
-        status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
-        if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
+        if (!InitializeAsyncResources(state, 4))
         {
-            return false;
+            state->initParams.enableEncodeAsync = 0;
+            state->asyncEnabled = false;
+            NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
+            createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+            status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
+            if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
+            {
+                return false;
+            }
+            state->bitstream = createBitstream.bitstreamBuffer;
         }
-        state->bitstream = createBitstream.bitstreamBuffer;
 
         return true;
     }
@@ -1641,7 +1898,25 @@ namespace
         pic.bufferFmt = usedBufferFormat;
         pic.inputWidth = state->width;
         pic.inputHeight = state->height;
-        pic.outputBitstream = state->bitstream;
+        size_t asyncSlot = 0;
+        if (state->asyncEnabled)
+        {
+            asyncSlot = state->asyncIndex % state->asyncBitstreams.size();
+            if (state->asyncPending[asyncSlot])
+            {
+                if (!ConsumeAsyncBitstream(state, asyncSlot))
+                {
+                    state->funcs.nvEncUnmapInputResource(state->session, map.mappedResource);
+                    return false;
+                }
+            }
+            pic.outputBitstream = state->asyncBitstreams[asyncSlot];
+            pic.completionEvent = state->asyncEvents[asyncSlot];
+        }
+        else
+        {
+            pic.outputBitstream = state->bitstream;
+        }
         pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
         pic.inputTimeStamp = state->frameIndex++;
         pic.inputDuration = 1;
@@ -1657,6 +1932,13 @@ namespace
             return false;
         }
 
+        if (state->asyncEnabled)
+        {
+            state->asyncPending[asyncSlot] = true;
+            state->asyncIndex = (asyncSlot + 1) % state->asyncBitstreams.size();
+            return true;
+        }
+
         NV_ENC_LOCK_BITSTREAM lockBitstream{};
         lockBitstream.version = NV_ENC_LOCK_BITSTREAM_VER;
         lockBitstream.outputBitstream = state->bitstream;
@@ -1666,107 +1948,17 @@ namespace
             return false;
         }
 
-        const auto* ptr = static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr);
-        const size_t size = lockBitstream.bitstreamSizeInBytes;
-        std::vector<uint8_t> buffer(ptr, ptr + size);
-        bool hevc = (state->initParams.encodeGUID == NV_ENC_CODEC_HEVC_GUID);
-        auto units = ParseAnnexB(buffer.data(), buffer.size(), hevc);
-
-        std::vector<uint8_t> sps;
-        std::vector<uint8_t> pps;
-        std::vector<uint8_t> vps;
-        bool isKeyframe = false;
-        for (const auto& unit : units)
-        {
-            if (!hevc)
-            {
-                if (unit.type == 7 && sps.empty())
-                {
-                    sps.assign(unit.data, unit.data + unit.size);
-                }
-                else if (unit.type == 8 && pps.empty())
-                {
-                    pps.assign(unit.data, unit.data + unit.size);
-                }
-                else if (unit.type == 5)
-                {
-                    isKeyframe = true;
-                }
-            }
-            else
-            {
-                if (unit.type == 32 && vps.empty())
-                {
-                    vps.assign(unit.data, unit.data + unit.size);
-                }
-                else if (unit.type == 33 && sps.empty())
-                {
-                    sps.assign(unit.data, unit.data + unit.size);
-                }
-                else if (unit.type == 34 && pps.empty())
-                {
-                    pps.assign(unit.data, unit.data + unit.size);
-                }
-                else if (unit.type == 19 || unit.type == 20)
-                {
-                    isKeyframe = true;
-                }
-            }
-        }
-
-        if (!state->writerInitialized)
-        {
-            std::vector<uint8_t> codecPrivate = hevc ? BuildHvcC(vps, sps, pps) : BuildAvcC(sps, pps);
-            if (codecPrivate.empty())
-            {
-                state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
-                return true;
-            }
-            if (!InitializeMp4Writer(state, hevc, codecPrivate))
-            {
-                state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
-                return false;
-            }
-        }
-        else if (state->codecPrivate.empty())
-        {
-            std::vector<uint8_t> codecPrivate = hevc ? BuildHvcC(vps, sps, pps) : BuildAvcC(sps, pps);
-            if (!codecPrivate.empty())
-            {
-                state->codecPrivate = codecPrivate;
-            }
-        }
-
-        if (buffer.empty())
-        {
-            state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
-            return true;
-        }
-
-        auto sampleData = ConvertToLengthPrefixed(units, false);
-        if (sampleData.empty())
-        {
-            state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
-            return true;
-        }
-
-        if (!state->writerStarted)
-        {
-            StartWriterThread(state);
-        }
-        if (state->writerError)
-        {
-            state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
-            return false;
-        }
-        {
-            std::lock_guard<std::mutex> lock(state->writerMutex);
-            state->sampleQueue.push_back({ std::move(sampleData), isKeyframe, false, 0 });
-        }
-        state->writerCv.notify_one();
+        bool ok = ProcessEncodedBitstream(state,
+            static_cast<uint8_t*>(lockBitstream.bitstreamBufferPtr),
+            lockBitstream.bitstreamSizeInBytes);
 
         status = state->funcs.nvEncUnlockBitstream(state->session, state->bitstream);
-        return CheckStatus(state, status, L"nvEncUnlockBitstream failed");
+        if (!CheckStatus(state, status, L"nvEncUnlockBitstream failed"))
+        {
+            return false;
+        }
+
+        return ok;
     }
 
     bool EnsureRgbResource(EncoderState* state, ID3D11Texture2D* texture)
@@ -2132,10 +2324,34 @@ int NvencFinalize(void* handle)
     NV_ENC_PIC_PARAMS pic{};
     pic.version = NV_ENC_PIC_PARAMS_VER;
     pic.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
+    if (state->asyncEnabled && !state->asyncBitstreams.empty())
+    {
+        size_t asyncSlot = state->asyncIndex % state->asyncBitstreams.size();
+        if (state->asyncPending[asyncSlot])
+        {
+            if (!ConsumeAsyncBitstream(state, asyncSlot))
+            {
+                return 0;
+            }
+        }
+        pic.outputBitstream = state->asyncBitstreams[asyncSlot];
+        pic.completionEvent = state->asyncEvents[asyncSlot];
+        state->asyncPending[asyncSlot] = true;
+        state->asyncIndex = (asyncSlot + 1) % state->asyncBitstreams.size();
+    }
+    else
+    {
+        pic.outputBitstream = state->bitstream;
+    }
     auto status = state->funcs.nvEncEncodePicture(state->session, &pic);
     if (status != NV_ENC_SUCCESS)
     {
         SetError(state, L"nvEncEncodePicture (EOS) failed");
+        return 0;
+    }
+
+    if (!DrainAsyncBitstreams(state))
+    {
         return 0;
     }
 
@@ -2157,6 +2373,7 @@ void NvencDestroy(void* handle)
 
     if (state->session)
     {
+        ReleaseAsyncResources(state);
         if (state->registeredRgb)
         {
             state->funcs.nvEncUnregisterResource(state->session, state->registeredRgb);
@@ -2178,6 +2395,7 @@ void NvencDestroy(void* handle)
 
     if (!state->mp4Finalized)
     {
+        DrainAsyncBitstreams(state);
         FinalizeMp4(state);
     }
 
