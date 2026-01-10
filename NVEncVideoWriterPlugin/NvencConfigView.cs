@@ -9,7 +9,6 @@ internal sealed class NvencConfigView : UserControl
     private readonly ComboBox _rateControlComboBox;
     private readonly TextBox _bitrateTextBox;
     private readonly ComboBox _qualityComboBox;
-    private readonly CheckBox _fastPresetCheckBox;
     private readonly NvencSettings _settings;
 
     public NvencConfigView(NvencSettings settings)
@@ -74,16 +73,6 @@ internal sealed class NvencConfigView : UserControl
             _settings.Quality = (NvencQuality)Math.Clamp(_qualityComboBox.SelectedIndex, 0, 2);
         };
         panel.Children.Add(_qualityComboBox);
-
-        _fastPresetCheckBox = new CheckBox
-        {
-            Content = "高速書き出し",
-            IsChecked = _settings.FastPreset,
-            Margin = new Thickness(0, 0, 0, 12),
-        };
-        _fastPresetCheckBox.Checked += (_, _) => _settings.FastPreset = true;
-        _fastPresetCheckBox.Unchecked += (_, _) => _settings.FastPreset = false;
-        panel.Children.Add(_fastPresetCheckBox);
 
         panel.Children.Add(new TextBlock
         {
