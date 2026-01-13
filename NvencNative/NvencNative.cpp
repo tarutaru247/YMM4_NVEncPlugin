@@ -1941,22 +1941,35 @@ namespace
             }
             state->bitstream = createBitstream.bitstreamBuffer;
         }
-        else if (!InitializeAsyncResources(state, 4))
+        else
         {
-            state->initParams.enableEncodeAsync = 0;
-            state->asyncEnabled = false;
-            if (codec == 1)
+            uint32_t asyncDepth = 4;
+            if (state->config.rcParams.enableLookahead && state->config.rcParams.lookaheadDepth > 0)
             {
-                LogLine(state, L"HEVC async failed, fallback to sync");
+                asyncDepth = std::max<uint32_t>(asyncDepth, state->config.rcParams.lookaheadDepth + 2);
             }
-            NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
-            createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
-            status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
-            if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
+            asyncDepth = std::min<uint32_t>(asyncDepth, 32);
+            LogLine(state, L"async depth=" + std::to_wstring(asyncDepth)
+                + L" lookahead=" + std::to_wstring(state->config.rcParams.enableLookahead)
+                + L" depth=" + std::to_wstring(state->config.rcParams.lookaheadDepth));
+
+            if (!InitializeAsyncResources(state, asyncDepth))
             {
-                return false;
+                state->initParams.enableEncodeAsync = 0;
+                state->asyncEnabled = false;
+                if (codec == 1)
+                {
+                    LogLine(state, L"HEVC async failed, fallback to sync");
+                }
+                NV_ENC_CREATE_BITSTREAM_BUFFER createBitstream{};
+                createBitstream.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+                status = state->funcs.nvEncCreateBitstreamBuffer(state->session, &createBitstream);
+                if (!CheckStatus(state, status, L"nvEncCreateBitstreamBuffer failed"))
+                {
+                    return false;
+                }
+                state->bitstream = createBitstream.bitstreamBuffer;
             }
-            state->bitstream = createBitstream.bitstreamBuffer;
         }
 
         return true;
@@ -2647,6 +2660,8 @@ void NvencDestroy(void* handle)
     }
 
     StopWriterThread(state);
+    // Ensure output file handle is released even if finalize failed or was skipped.
+    state->file.Close();
 
     CloseLog(state);
     delete state;
